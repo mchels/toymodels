@@ -3,6 +3,7 @@ package kvstore
 import (
 	"kvstore/proto"
 	"testing"
+	"time"
 )
 
 func TestNewRaftNode(t *testing.T) {
@@ -43,5 +44,22 @@ func TestRequestVote_DeniesVote_AlreadyVoted(t *testing.T) {
 
 	if resp.VoteGranted {
 		t.Error("should deny vote, already voted this term")
+	}
+}
+
+func TestElectionTimeout_BecomeCandidate(t *testing.T) {
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond) // Short timeout for testing
+
+	node.Start()
+	defer node.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if node.State() != Candidate {
+		t.Errorf("should become Candidate after timeout, got %v", node.State())
+	}
+	if node.CurrentTerm() != 1 {
+		t.Errorf("should increment term to 1, got %d", node.CurrentTerm())
 	}
 }

@@ -2,6 +2,7 @@ package kvstore
 
 import (
 	"kvstore/proto"
+	"time"
 )
 
 type NodeState string
@@ -13,16 +14,18 @@ const (
 )
 
 type node struct {
-	name  string
-	state NodeState
-	term  uint64
+	name            string
+	state           NodeState
+	term            uint64
+	electionTimeout time.Duration
 }
 
 func NewRaftNode(name string) *node {
 	return &node{
-		name:  name,
-		state: Follower,
-		term:  0,
+		name:            name,
+		state:           Follower,
+		term:            0,
+		electionTimeout: 300 * time.Millisecond,
 	}
 }
 
@@ -32,6 +35,24 @@ func (node *node) State() NodeState {
 
 func (node *node) CurrentTerm() uint64 {
 	return node.term
+}
+
+func (node *node) Start() {
+	go node.waitForHeartbeat()
+}
+
+func (node *node) Stop() {
+
+}
+
+func (node *node) waitForHeartbeat() {
+	time.Sleep(node.electionTimeout)
+	node.state = Candidate
+	node.term += 1
+}
+
+func (node *node) SetElectionTimeout(timeout time.Duration) {
+	node.electionTimeout = timeout
 }
 
 func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.RequestVoteResponse {
