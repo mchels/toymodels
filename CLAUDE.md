@@ -25,20 +25,28 @@ Each session follows this pattern:
 
 ## Task Format
 
-Tasks are TDD-style:
+Tasks are TDD-style with behavioral requirements:
 
 ```
 ## Task N: [Short description]
 
 **Concept**: What this teaches
 
+**Requirements**: Behavioral specifications that implicitly require certain patterns
+- Example: "Stop() must terminate within 100ms" (implies channels/signaling)
+- Example: "Must be safe for concurrent access" (implies mutex)
+
 **Test file**: `path/to/test_file`
 
 **Make this pass**:
 [Test code]
 
+**Go Concepts to Cover**: Hints about tools you'll likely need (not a checklist)
+
 **Hints available**: yes
 ```
+
+The requirements describe *behavior*, the concepts hint at *tools*. If you satisfy the behavioral requirements, you'll naturally use the right patterns.
 
 You write the implementation. If you get stuck, ask and I'll give Socratic hints (leading questions, not answers).
 

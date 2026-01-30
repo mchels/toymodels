@@ -63,3 +63,69 @@ func TestElectionTimeout_BecomeCandidate(t *testing.T) {
 		t.Errorf("should increment term to 1, got %d", node.CurrentTerm())
 	}
 }
+
+func TestStop_TerminatesGoroutine(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(500 * time.Millisecond)
+    node.Start()
+
+    time.Sleep(50 * time.Millisecond) // Let it start
+    node.Stop()
+    time.Sleep(100 * time.Millisecond) // Give it time to stop
+
+    // Should still be Follower (election didn't fire)
+    if node.State() != Follower {
+        t.Errorf("stop should prevent election, got %v", node.State())
+    }
+}
+
+func TestHeartbeat_ResetsElectionTimer(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(100 * time.Millisecond)
+    node.Start()
+    defer node.Stop()
+
+    // Send heartbeats faster than election timeout
+    for i := 0; i < 5; i++ {
+        time.Sleep(50 * time.Millisecond)
+        node.ReceiveHeartbeat(1) // term 1
+    }
+
+    // Should still be Follower after 250ms (5 * 50ms)
+    if node.State() != Follower {
+        t.Errorf("heartbeats should prevent election, got %v", node.State())
+    }
+}
+
+func TestConcurrentAccess(t *testing.T) {
+    // Run with: go test -race
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+    node.Start()
+    defer node.Stop()
+
+    done := make(chan bool)
+
+    // Concurrent readers
+    go func() {
+        for i := 0; i < 100; i++ {
+            _ = node.State()
+            _ = node.CurrentTerm()
+        }
+        done <- true
+    }()
+
+    // Concurrent vote requests
+    go func() {
+        for i := 0; i < 100; i++ {
+            node.HandleRequestVote(&proto.RequestVoteRequest{
+                Term:        uint64(i),
+                CandidateId: "node2",
+            })
+        }
+        done <- true
+    }()
+
+    <-done
+    <-done
+}

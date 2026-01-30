@@ -278,3 +278,98 @@ func TestElectionTimeout_BecomeCandidate(t *testing.T) {
 2. Node starts as Follower with term 0
 3. RequestVote grants/denies votes correctly
 4. Node becomes Candidate after election timeout
+
+---
+
+## Task 3.5: Raft Election with Proper Concurrency
+
+**Concept**: Refactor the election timeout mechanism to use proper Go concurrency patterns. This addresses the minimal implementation from Task 3.
+
+**Requirements**:
+- `Stop()` must terminate the background goroutine within 100ms
+- All public methods must be safe to call from multiple goroutines (tests run with `-race`)
+- Election timer must reset when a valid heartbeat is received
+- Node must be restartable after Stop()
+
+**New Tests to Add** (`raft_test.go`):
+
+```go
+func TestStop_TerminatesGoroutine(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(500 * time.Millisecond)
+    node.Start()
+
+    time.Sleep(50 * time.Millisecond) // Let it start
+    node.Stop()
+    time.Sleep(100 * time.Millisecond) // Give it time to stop
+
+    // Should still be Follower (election didn't fire)
+    if node.State() != Follower {
+        t.Errorf("stop should prevent election, got %v", node.State())
+    }
+}
+
+func TestHeartbeat_ResetsElectionTimer(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(100 * time.Millisecond)
+    node.Start()
+    defer node.Stop()
+
+    // Send heartbeats faster than election timeout
+    for i := 0; i < 5; i++ {
+        time.Sleep(50 * time.Millisecond)
+        node.ReceiveHeartbeat(1) // term 1
+    }
+
+    // Should still be Follower after 250ms (5 * 50ms)
+    if node.State() != Follower {
+        t.Errorf("heartbeats should prevent election, got %v", node.State())
+    }
+}
+
+func TestConcurrentAccess(t *testing.T) {
+    // Run with: go test -race
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+    node.Start()
+    defer node.Stop()
+
+    done := make(chan bool)
+
+    // Concurrent readers
+    go func() {
+        for i := 0; i < 100; i++ {
+            _ = node.State()
+            _ = node.CurrentTerm()
+        }
+        done <- true
+    }()
+
+    // Concurrent vote requests
+    go func() {
+        for i := 0; i < 100; i++ {
+            node.HandleRequestVote(&proto.RequestVoteRequest{
+                Term:        uint64(i),
+                CandidateId: "node2",
+            })
+        }
+        done <- true
+    }()
+
+    <-done
+    <-done
+}
+```
+
+**Go Concepts to Cover** (hints, not requirements):
+- `sync.Mutex` for protecting shared state
+- Channels for stop signaling
+- `time.Timer` with Reset() for resettable timeouts
+- `select` statement for handling multiple event sources
+
+**Hints available**: yes
+
+**Verification**:
+1. `go test -race ./...` passes all tests (no race conditions)
+2. `Stop()` actually stops the election timer
+3. Heartbeats prevent election timeout from firing
