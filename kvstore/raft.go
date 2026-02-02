@@ -1,6 +1,7 @@
 package kvstore
 
 import (
+	"context"
 	"kvstore/proto"
 	"sync"
 	"time"
@@ -20,7 +21,7 @@ type node struct {
 	term            uint64
 	electionTimeout time.Duration
 	heartbeatChan   chan uint64
-	quitChan        chan bool
+	cancel          context.CancelFunc
 	mu              sync.Mutex
 }
 
@@ -31,7 +32,6 @@ func NewRaftNode(name string) *node {
 		term:            0,
 		electionTimeout: 300 * time.Millisecond,
 		heartbeatChan:   make(chan uint64),
-		quitChan:        make(chan bool),
 	}
 }
 
@@ -48,46 +48,60 @@ func (node *node) CurrentTerm() uint64 {
 }
 
 func (node *node) Start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	node.mu.Lock()
 	timeoutTimer := time.NewTimer(node.electionTimeout)
-	go func() {
+	if node.cancel != nil {
+		node.cancel()
+	}
+	node.cancel = cancel
+	node.mu.Unlock()
+	go func(ctx context.Context) {
 		for {
 			select {
 			case <-timeoutTimer.C:
 				node.startElection()
-			case _ = <-node.heartbeatChan:
+			case <-node.heartbeatChan:
 				// TODO do something with received term.
 				timeoutTimer.Reset(node.electionTimeout)
-			case <-node.quitChan:
+			case <-ctx.Done():
 				timeoutTimer.Stop()
 				return
 			}
 		}
-	}()
+	}(ctx)
 }
 
 func (node *node) Stop() {
-	close(node.quitChan)
+	node.mu.Lock()
+	if node.cancel != nil {
+		node.cancel()
+	}
+	node.mu.Unlock()
 }
 
 func (node *node) startElection() {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	node.state = Candidate
-	node.term += 1
+	node.term++
 }
 
 func (node *node) ReceiveHeartbeat(term uint64) {
+	// TODO: This blocks forever if Start hasn't been called.
 	node.heartbeatChan <- term
 }
 
 func (node *node) SetElectionTimeout(timeout time.Duration) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
 	node.electionTimeout = timeout
 }
 
 func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.RequestVoteResponse {
+	node.mu.Lock()
+	defer node.mu.Unlock()
 	if req.Term > node.term {
-		node.mu.Lock()
-		defer node.mu.Unlock()
 		node.term = req.Term
 		node.state = Follower
 		return &proto.RequestVoteResponse{
