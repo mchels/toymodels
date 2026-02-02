@@ -373,3 +373,212 @@ func TestConcurrentAccess(t *testing.T) {
 1. `go test -race ./...` passes all tests (no race conditions)
 2. `Stop()` actually stops the election timer
 3. Heartbeats prevent election timeout from firing
+
+
+
+# Task 4: Candidate Requests Votes and Becomes Leader
+
+Concept
+
+When a node's election timer fires and it becomes a Candidate, it must:
+1. Vote for itself (always gets 1 vote)
+2. Send RequestVote RPCs to all other nodes in the cluster
+3. If it receives votes from a majority (including itself), become Leader
+4. If not, stay Candidate (retry on next timeout)
+
+A 3-node cluster needs 2 votes. A 5-node cluster needs 3.
+
+Requirements
+
+- A candidate in a 3-node cluster that receives votes from both peers must become Leader
+- A candidate that receives only its own vote must stay Candidate
+- Vote requests must be sent to all peers concurrently (not sequentially)
+- The node must be testable without real network connections
+- Single-node cluster becomes Leader immediately (majority of 1)
+
+Test file: kvstore/raft_test.go
+
+Add this interface to raft.go:
+
+// Peer represents a remote Raft node that can be called for votes
+type Peer interface {
+    RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error)
+}
+
+Make these tests pass:
+
+// Mock peer for testing
+type mockPeer struct {
+    voteGranted bool
+    term        uint64
+    mu          sync.Mutex
+}
+
+func (m *mockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    return &proto.RequestVoteResponse{
+        Term:        m.term,
+        VoteGranted: m.voteGranted,
+    }, nil
+}
+
+func TestCandidate_WinsMajority_BecomesLeader(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+
+    // Two peers that will grant votes
+    peer1 := &mockPeer{voteGranted: true, term: 1}
+    peer2 := &mockPeer{voteGranted: true, term: 1}
+    node.SetPeers([]Peer{peer1, peer2}) // 3-node cluster
+
+    node.Start()
+    defer node.Stop()
+
+    time.Sleep(100 * time.Millisecond)
+
+    if node.State() != Leader {
+        t.Errorf("should become Leader with majority, got %v", node.State())
+    }
+}
+
+func TestCandidate_NoMajority_StaysCandidate(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+
+    // Two peers that deny votes
+    peer1 := &mockPeer{voteGranted: false, term: 1}
+    peer2 := &mockPeer{voteGranted: false, term: 1}
+    node.SetPeers([]Peer{peer1, peer2})
+
+    node.Start()
+    defer node.Stop()
+
+    time.Sleep(100 * time.Millisecond)
+
+    if node.State() != Candidate {
+        t.Errorf("should stay Candidate without majority, got %v", node.State())
+    }
+}
+
+func TestCandidate_PartialVotes_NeedsMajority(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+
+    // 5-node cluster: need 3 votes for majority
+    peer1 := &mockPeer{voteGranted: true, term: 1}  // grants
+    peer2 := &mockPeer{voteGranted: false, term: 1} // denies
+    peer3 := &mockPeer{voteGranted: false, term: 1} // denies
+    peer4 := &mockPeer{voteGranted: false, term: 1} // denies
+    node.SetPeers([]Peer{peer1, peer2, peer3, peer4})
+
+    node.Start()
+    defer node.Stop()
+
+    time.Sleep(100 * time.Millisecond)
+
+    // 2 votes (self + peer1) out of 5 - not majority
+    if node.State() != Candidate {
+        t.Errorf("should stay Candidate with 2/5 votes, got %v", node.State())
+    }
+}
+
+func TestCandidate_VotesRequestedConcurrently(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+
+    // Peers that take time to respond
+    slowPeer1 := &slowMockPeer{delay: 30 * time.Millisecond, voteGranted: true, term: 1}
+    slowPeer2 := &slowMockPeer{delay: 30 * time.Millisecond, voteGranted: true, term: 1}
+    node.SetPeers([]Peer{slowPeer1, slowPeer2})
+
+    start := time.Now()
+    node.Start()
+    defer node.Stop()
+
+    time.Sleep(150 * time.Millisecond)
+    elapsed := time.Since(start)
+
+    if node.State() != Leader {
+        t.Errorf("should become Leader, got %v", node.State())
+    }
+
+    // If sequential: 50ms + 30ms + 30ms = 110ms minimum
+    // If concurrent: 50ms + 30ms = 80ms
+    if elapsed > 120*time.Millisecond {
+        t.Errorf("votes appear sequential, took %v (expected < 120ms)", elapsed)
+    }
+}
+
+type slowMockPeer struct {
+    delay       time.Duration
+    voteGranted bool
+    term        uint64
+}
+
+func (m *slowMockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+    time.Sleep(m.delay)
+    return &proto.RequestVoteResponse{
+        Term:        m.term,
+        VoteGranted: m.voteGranted,
+    }, nil
+}
+
+func TestSingleNodeCluster_BecomesLeader(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+    node.SetPeers([]Peer{}) // No peers
+
+    node.Start()
+    defer node.Stop()
+
+    time.Sleep(100 * time.Millisecond)
+
+    if node.State() != Leader {
+        t.Errorf("single node should become Leader, got %v", node.State())
+    }
+}
+
+Go Concepts to Cover
+
+- Interfaces: Define Peer interface for testability (mock peers vs real gRPC clients)
+- Goroutines: Send RequestVote to each peer concurrently with go func()
+- Channels or sync.WaitGroup: Collect responses from concurrent goroutines
+- Majority calculation: majority := (clusterSize / 2) + 1
+- Context: Pass context to peer RPCs
+
+What to modify in startElection()
+
+Currently:
+func (node *node) startElection() {
+    node.mu.Lock()
+    defer node.mu.Unlock()
+    node.state = Candidate
+    node.term++
+}
+
+Needs to:
+1. Increment term, become Candidate
+2. Count self-vote (1)
+3. Send RequestVote to all peers concurrently
+4. Collect responses, count granted votes
+5. If votes >= majority, become Leader
+
+Files to modify
+
+- kvstore/raft.go - Add Peer interface, peers field, SetPeers(), update startElection()
+- kvstore/raft_test.go - Add the test cases above
+
+Verification
+
+go test -race ./kvstore/...
+
+All tests pass, including:
+- Majority votes → Leader
+- No majority → stays Candidate
+- Single node → Leader
+- Concurrent timing test passes
+
+Hints available
+
+Yes - ask if stuck on goroutine coordination, channel patterns, or majority calculation.

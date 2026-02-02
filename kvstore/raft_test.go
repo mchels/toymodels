@@ -1,7 +1,9 @@
 package kvstore
 
 import (
+	"context"
 	"kvstore/proto"
+	"sync"
 	"testing"
 	"time"
 )
@@ -128,4 +130,141 @@ func TestConcurrentAccess(t *testing.T) {
 
 	<-done
 	<-done
+}
+
+// =============================================================================
+// Task 4: Candidate Requests Votes and Becomes Leader
+// =============================================================================
+
+// Mock peer for testing
+type mockPeer struct {
+	voteGranted bool
+	term        uint64
+	mu          sync.Mutex
+}
+
+func (m *mockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &proto.RequestVoteResponse{
+		Term:        m.term,
+		VoteGranted: m.voteGranted,
+	}, nil
+}
+
+// Slow peer for testing concurrency
+type slowMockPeer struct {
+	delay       time.Duration
+	voteGranted bool
+	term        uint64
+}
+
+func (m *slowMockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+	time.Sleep(m.delay)
+	return &proto.RequestVoteResponse{
+		Term:        m.term,
+		VoteGranted: m.voteGranted,
+	}, nil
+}
+
+func TestCandidate_WinsMajority_BecomesLeader(t *testing.T) {
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond)
+
+	// Two peers that will grant votes
+	peer1 := &mockPeer{voteGranted: true, term: 1}
+	peer2 := &mockPeer{voteGranted: true, term: 1}
+	node.SetPeers([]Peer{peer1, peer2}) // 3-node cluster
+
+	node.Start()
+	defer node.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if node.State() != Leader {
+		t.Errorf("should become Leader with majority, got %v", node.State())
+	}
+}
+
+func TestCandidate_NoMajority_StaysCandidate(t *testing.T) {
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond)
+
+	// Two peers that deny votes
+	peer1 := &mockPeer{voteGranted: false, term: 1}
+	peer2 := &mockPeer{voteGranted: false, term: 1}
+	node.SetPeers([]Peer{peer1, peer2})
+
+	node.Start()
+	defer node.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if node.State() != Candidate {
+		t.Errorf("should stay Candidate without majority, got %v", node.State())
+	}
+}
+
+func TestCandidate_PartialVotes_NeedsMajority(t *testing.T) {
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond)
+
+	// 5-node cluster: need 3 votes for majority
+	peer1 := &mockPeer{voteGranted: true, term: 1}  // grants
+	peer2 := &mockPeer{voteGranted: false, term: 1} // denies
+	peer3 := &mockPeer{voteGranted: false, term: 1} // denies
+	peer4 := &mockPeer{voteGranted: false, term: 1} // denies
+	node.SetPeers([]Peer{peer1, peer2, peer3, peer4})
+
+	node.Start()
+	defer node.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 2 votes (self + peer1) out of 5 - not majority
+	if node.State() != Candidate {
+		t.Errorf("should stay Candidate with 2/5 votes, got %v", node.State())
+	}
+}
+
+func TestCandidate_VotesRequestedConcurrently(t *testing.T) {
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond)
+
+	// Peers that take time to respond
+	slowPeer1 := &slowMockPeer{delay: 30 * time.Millisecond, voteGranted: true, term: 1}
+	slowPeer2 := &slowMockPeer{delay: 30 * time.Millisecond, voteGranted: true, term: 1}
+	node.SetPeers([]Peer{slowPeer1, slowPeer2})
+
+	start := time.Now()
+	node.Start()
+	defer node.Stop()
+
+	time.Sleep(150 * time.Millisecond)
+	elapsed := time.Since(start)
+
+	if node.State() != Leader {
+		t.Errorf("should become Leader, got %v", node.State())
+	}
+
+	// If sequential: 50ms + 30ms + 30ms = 110ms minimum
+	// If concurrent: 50ms + 30ms = 80ms
+	if elapsed > 120*time.Millisecond {
+		t.Errorf("votes appear sequential, took %v (expected < 120ms)", elapsed)
+	}
+}
+
+func TestSingleNodeCluster_BecomesLeader(t *testing.T) {
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond)
+	node.SetPeers([]Peer{}) // No peers
+
+	node.Start()
+	defer node.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	if node.State() != Leader {
+		t.Errorf("single node should become Leader, got %v", node.State())
+	}
 }
