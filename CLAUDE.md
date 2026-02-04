@@ -2,6 +2,10 @@
 
 A framework for learning technical topics through hands-on implementation.
 
+## Communication Style
+
+Be concise. I have a physics background so I prefer text that gets to the point like equations.
+
 ## Core Idea
 
 Pick a topic. Design a toy project that teaches its core concepts. Build it incrementally, starting with the smallest runnable thing. Expand as understanding grows.
