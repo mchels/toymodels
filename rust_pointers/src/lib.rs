@@ -356,7 +356,7 @@ pub struct Node<T> {
 ///
 /// # Safety
 /// nn must point to a valid Node
-pub unsafe fn get_elem<T>(nn: NonNull<Node<T>>) -> &T {
+pub unsafe fn get_elem<'a, T>(nn: NonNull<Node<T>>) -> &'a T {
     todo!()
 }
 
@@ -364,7 +364,7 @@ pub unsafe fn get_elem<T>(nn: NonNull<Node<T>>) -> &T {
 ///
 /// # Safety
 /// nn must point to a valid Node, and no other references may exist.
-pub unsafe fn get_elem_mut<T>(nn: NonNull<Node<T>>) -> &mut T {
+pub unsafe fn get_elem_mut<'a, T>(nn: NonNull<Node<T>>) -> &'a mut T {
     todo!()
 }
 
