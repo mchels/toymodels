@@ -2,6 +2,7 @@
 //!
 //! Run tests with: cargo test
 //! Run specific task: cargo test task1
+//! See rust_pointers/rust_pointers.md for more info.
 
 #![allow(unused)]
 
@@ -18,12 +19,12 @@ use std::ptr::NonNull;
 
 /// Convert address to a mutable raw pointer to u8
 pub fn addr_to_ptr_mut(addr: usize) -> *mut u8 {
-    todo!()
+    addr as *mut u8
 }
 
 /// Convert address to a const raw pointer to u32
 pub fn addr_to_ptr_const(addr: usize) -> *const u32 {
-    todo!()
+    addr as *const u32
 }
 
 #[cfg(test)]
@@ -56,12 +57,12 @@ mod task1 {
 
 /// Convert a shared reference to a const raw pointer
 pub fn ref_to_const_ptr<T>(r: &T) -> *const T {
-    todo!()
+    r as *const T
 }
 
 /// Convert a mutable reference to a mutable raw pointer
 pub fn ref_to_mut_ptr<T>(r: &mut T) -> *mut T {
-    todo!()
+    r as *mut T
 }
 
 #[cfg(test)]
@@ -96,7 +97,7 @@ mod task2 {
 /// # Safety
 /// ptr must point to a valid, initialized T
 pub unsafe fn read_through_ptr<T: Copy>(ptr: *const T) -> T {
-    todo!()
+    *ptr
 }
 
 /// Write a value through a mutable raw pointer.
@@ -104,7 +105,7 @@ pub unsafe fn read_through_ptr<T: Copy>(ptr: *const T) -> T {
 /// # Safety
 /// ptr must point to valid, writable memory for T
 pub unsafe fn write_through_ptr<T>(ptr: *mut T, value: T) {
-    todo!()
+    *ptr = value
 }
 
 #[cfg(test)]
@@ -143,7 +144,7 @@ mod task3 {
 /// ptr must be valid, aligned, and point to initialized data.
 /// The returned reference must not outlive the data.
 pub unsafe fn ptr_to_ref<'a, T>(ptr: *const T) -> &'a T {
-    todo!()
+    &*ptr
 }
 
 /// Convert a mutable raw pointer to a mutable reference.
@@ -152,7 +153,7 @@ pub unsafe fn ptr_to_ref<'a, T>(ptr: *const T) -> &'a T {
 /// ptr must be valid, aligned, point to initialized data,
 /// and no other references to the data may exist.
 pub unsafe fn ptr_to_mut_ref<'a, T>(ptr: *mut T) -> &'a mut T {
-    todo!()
+    &mut *ptr
 }
 
 #[cfg(test)]
@@ -196,7 +197,7 @@ pub struct Point {
 /// # Safety
 /// ptr must point to a valid Point
 pub unsafe fn read_x(ptr: *const Point) -> i32 {
-    todo!()
+    (*ptr).x
 }
 
 /// Set the y field of a Point through a raw pointer.
@@ -204,7 +205,7 @@ pub unsafe fn read_x(ptr: *const Point) -> i32 {
 /// # Safety
 /// ptr must point to a valid, writable Point
 pub unsafe fn write_y(ptr: *mut Point, value: i32) {
-    todo!()
+    (*ptr).y = value
 }
 
 #[cfg(test)]
@@ -240,12 +241,12 @@ mod task5 {
 
 /// Wrap a raw pointer in NonNull, returning None if null.
 pub fn wrap_in_nonnull<T>(ptr: *mut T) -> Option<NonNull<T>> {
-    todo!()
+    NonNull::new(ptr)
 }
 
 /// Get the raw pointer from a NonNull.
 pub fn unwrap_nonnull<T>(nn: NonNull<T>) -> *mut T {
-    todo!()
+    nn.as_ptr()
 }
 
 /// Read a value through NonNull.
@@ -253,7 +254,7 @@ pub fn unwrap_nonnull<T>(nn: NonNull<T>) -> *mut T {
 /// # Safety
 /// The NonNull must point to valid, initialized data.
 pub unsafe fn read_via_nonnull<T: Copy>(nn: NonNull<T>) -> T {
-    todo!()
+    nn.read()
 }
 
 #[cfg(test)]
@@ -301,7 +302,7 @@ mod task6 {
 
 /// Convert a Box to a raw pointer (ownership transferred out).
 pub fn box_to_raw<T>(b: Box<T>) -> *mut T {
-    todo!()
+    Box::into_raw(b)
 }
 
 /// Convert a raw pointer back to a Box (takes ownership).
@@ -309,7 +310,7 @@ pub fn box_to_raw<T>(b: Box<T>) -> *mut T {
 /// # Safety
 /// ptr must have come from Box::into_raw and not been freed.
 pub unsafe fn raw_to_box<T>(ptr: *mut T) -> Box<T> {
-    todo!()
+    Box::from_raw(ptr)
 }
 
 #[cfg(test)]
@@ -357,7 +358,7 @@ pub struct Node<T> {
 /// # Safety
 /// nn must point to a valid Node
 pub unsafe fn get_elem<'a, T>(nn: NonNull<Node<T>>) -> &'a T {
-    todo!()
+    &(*nn.as_ptr()).elem
 }
 
 /// Get a mutable reference to the element in a node.
@@ -365,7 +366,7 @@ pub unsafe fn get_elem<'a, T>(nn: NonNull<Node<T>>) -> &'a T {
 /// # Safety
 /// nn must point to a valid Node, and no other references may exist.
 pub unsafe fn get_elem_mut<'a, T>(nn: NonNull<Node<T>>) -> &'a mut T {
-    todo!()
+    &mut (*nn.as_ptr()).elem
 }
 
 /// Set the next pointer of a node.
@@ -373,7 +374,7 @@ pub unsafe fn get_elem_mut<'a, T>(nn: NonNull<Node<T>>) -> &'a mut T {
 /// # Safety
 /// nn must point to a valid Node
 pub unsafe fn set_next<T>(nn: NonNull<Node<T>>, next: Option<NonNull<Node<T>>>) {
-    todo!()
+    (*nn.as_ptr()).next = next
 }
 
 #[cfg(test)]
