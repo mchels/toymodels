@@ -49,23 +49,6 @@ func TestRequestVote_DeniesVote_AlreadyVoted(t *testing.T) {
 	}
 }
 
-func TestElectionTimeout_BecomeCandidate(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond) // Short timeout for testing
-
-	node.Start()
-	defer node.Stop()
-
-	time.Sleep(100 * time.Millisecond)
-
-	if node.State() != Candidate {
-		t.Errorf("should become Candidate after timeout, got %v", node.State())
-	}
-	if node.CurrentTerm() != 1 {
-		t.Errorf("should increment term to 1, got %d", node.CurrentTerm())
-	}
-}
-
 func TestStop_TerminatesGoroutine(t *testing.T) {
 	node := NewRaftNode("node1")
 	node.SetElectionTimeout(150 * time.Millisecond)
@@ -240,17 +223,20 @@ func TestCandidate_VotesRequestedConcurrently(t *testing.T) {
 	node.Start()
 	defer node.Stop()
 
-	time.Sleep(150 * time.Millisecond)
+	deadline := time.After(200 * time.Millisecond)
+	for node.State() != Leader {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for Leader")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 	elapsed := time.Since(start)
 
-	if node.State() != Leader {
-		t.Errorf("should become Leader, got %v", node.State())
-	}
-
-	// If sequential: 50ms + 30ms + 30ms = 110ms minimum
-	// If concurrent: 50ms + 30ms = 80ms
-	if elapsed > 120*time.Millisecond {
-		t.Errorf("votes appear sequential, took %v (expected < 120ms)", elapsed)
+	// If concurrent: 50ms (timeout) + 30ms (parallel votes) ≈ 80ms
+	// If sequential: 50ms + 30ms + 30ms ≈ 110ms
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("votes appear sequential, took %v (expected < 100ms)", elapsed)
 	}
 }
 

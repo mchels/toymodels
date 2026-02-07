@@ -15,6 +15,11 @@ const (
 	Leader              = "Leader"
 )
 
+// Peer represents a remote Raft node that can be called for votes
+type Peer interface {
+	RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error)
+}
+
 type node struct {
 	name            string
 	state           NodeState
@@ -22,6 +27,7 @@ type node struct {
 	electionTimeout time.Duration
 	heartbeatChan   chan uint64
 	cancel          context.CancelFunc
+	peers           []Peer
 	mu              sync.Mutex
 }
 
@@ -32,6 +38,7 @@ func NewRaftNode(name string) *node {
 		term:            0,
 		electionTimeout: 300 * time.Millisecond,
 		heartbeatChan:   make(chan uint64),
+		peers:           []Peer{},
 	}
 }
 
@@ -45,6 +52,12 @@ func (node *node) CurrentTerm() uint64 {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	return node.term
+}
+
+func (node *node) SetPeers(peers []Peer) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.peers = peers
 }
 
 func (node *node) Start() {
@@ -82,9 +95,53 @@ func (node *node) Stop() {
 
 func (node *node) startElection() {
 	node.mu.Lock()
-	defer node.mu.Unlock()
 	node.state = Candidate
 	node.term++
+	nVotes := 1 // Start out by voting for self.
+	var wg sync.WaitGroup
+	// TODO: How to pass responses and error on a channel? Simple option: Wrap in a struct.
+	// TODO: What should we do on errors, actually? Right now we just ignore them.
+	results := make(chan bool)
+	nVotesRequired := (len(node.peers)+1)/2 + 1
+	for _, peer := range node.peers {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req := &proto.RequestVoteRequest{
+			Term:        node.term,
+			CandidateId: node.name,
+		}
+		wg.Add(1)
+		go func(p Peer) {
+			defer wg.Done()
+			resp, err := p.RequestVote(ctx, req)
+			if err != nil {
+				// TODO: Handle
+			}
+			if resp != nil {
+				results <- resp.VoteGranted
+			} else {
+				results <- false
+			}
+		}(peer)
+	}
+	node.mu.Unlock()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for granted := range results {
+		if granted {
+			nVotes++
+		}
+	}
+
+	if nVotes >= nVotesRequired {
+		node.mu.Lock()
+		node.state = Leader
+		node.mu.Unlock()
+	}
 }
 
 func (node *node) ReceiveHeartbeat(term uint64) {
