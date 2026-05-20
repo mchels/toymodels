@@ -582,3 +582,187 @@ All tests pass, including:
 Hints available
 
 Yes - ask if stuck on goroutine coordination, channel patterns, or majority calculation.
+
+---
+
+# Task 5: Fix Loose Ends in the Raft Node
+
+Concept
+
+Tasks 3, 3.5, and 4 produced a node that holds elections and can become Leader, but the implementation has accumulated TODOs and quiet bugs that will compound once we add AppendEntries / log replication. This task is a cleanup pass: tighten the state machine so heartbeats and log replication can be built on a sound base.
+
+This teaches:
+- Raft safety invariants beyond election (step-down on higher term, votedFor)
+- State-aware run loops (a Leader must not run an election timer)
+- Non-blocking channel sends (select with default)
+- Randomized timeouts to avoid split votes
+- Defensive coding under -race
+
+Requirements
+
+1. ReceiveHeartbeat(term) must not block if Start has not been called. Calling it on a stopped node is a no-op.
+2. A Leader must not increment its term on its own election timer. Once state is Leader, the run loop must not call startElection.
+3. If startElection observes a peer response with Term > node.term, the node must step down to Follower at that term and abort the election (no Leader transition for that term).
+4. HandleRequestVote must track votedFor explicitly:
+   - On term change: clear votedFor.
+   - At the same term: grant only if votedFor is unset OR equals the requesting candidate (idempotent).
+5. RequestVote errors from peers must be logged (use the stdlib log package). The result channel still receives false on error so vote counting is unaffected.
+6. Election timeout must be randomized: the actual wait is uniform in [timeout, 2*timeout) on each (re)set. The lower bound is the configured value, so existing tests that set a short timeout still fire within their expected window.
+
+Test file: kvstore/raft_test.go
+
+Make these tests pass:
+
+func TestReceiveHeartbeat_BeforeStart_DoesNotBlock(t *testing.T) {
+    node := NewRaftNode("node1")
+    done := make(chan struct{})
+    go func() {
+        node.ReceiveHeartbeat(0)
+        close(done)
+    }()
+    select {
+    case <-done:
+    case <-time.After(100 * time.Millisecond):
+        t.Fatal("ReceiveHeartbeat blocked when Start had not been called")
+    }
+}
+
+func TestLeader_DoesNotStartNewElection(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+    node.SetPeers([]Peer{
+        &mockPeer{voteGranted: true, term: 1},
+        &mockPeer{voteGranted: true, term: 1},
+    })
+    node.Start()
+    defer node.Stop()
+
+    // Wait until Leader.
+    deadline := time.After(500 * time.Millisecond)
+    for node.State() != Leader {
+        select {
+        case <-deadline:
+            t.Fatal("never became Leader")
+        case <-time.After(5 * time.Millisecond):
+        }
+    }
+    leaderTerm := node.CurrentTerm()
+
+    // Sleep well past several election timeouts.
+    time.Sleep(300 * time.Millisecond)
+
+    if node.State() != Leader {
+        t.Errorf("Leader should not step down without external cause, got %v", node.State())
+    }
+    if node.CurrentTerm() != leaderTerm {
+        t.Errorf("Leader term advanced from %d to %d (phantom election)", leaderTerm, node.CurrentTerm())
+    }
+}
+
+func TestCandidate_StepsDown_OnHigherTermResponse(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.SetElectionTimeout(50 * time.Millisecond)
+    node.SetPeers([]Peer{
+        &mockPeer{voteGranted: false, term: 99},
+        &mockPeer{voteGranted: false, term: 99},
+    })
+    node.Start()
+    defer node.Stop()
+
+    time.Sleep(150 * time.Millisecond)
+
+    if node.State() != Follower {
+        t.Errorf("should step down to Follower on higher-term response, got %v", node.State())
+    }
+    if node.CurrentTerm() != 99 {
+        t.Errorf("should adopt peer term 99, got %d", node.CurrentTerm())
+    }
+}
+
+func TestRequestVote_SameTerm_DifferentCandidate_Denied(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
+    resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node3"})
+    if resp.VoteGranted {
+        t.Error("should deny: already voted for node2 in term 5")
+    }
+}
+
+func TestRequestVote_SameTerm_SameCandidate_Granted(t *testing.T) {
+    node := NewRaftNode("node1")
+    node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
+    resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
+    if !resp.VoteGranted {
+        t.Error("re-vote for same candidate at same term must be idempotent")
+    }
+}
+
+func TestElectionTimeout_IsRandomized(t *testing.T) {
+    const N = 20
+    base := 80 * time.Millisecond
+    fires := make([]time.Duration, N)
+    var wg sync.WaitGroup
+    for i := 0; i < N; i++ {
+        wg.Add(1)
+        go func(i int) {
+            defer wg.Done()
+            n := NewRaftNode("n")
+            n.SetElectionTimeout(base)
+            n.SetPeers([]Peer{&mockPeer{voteGranted: false, term: 0}, &mockPeer{voteGranted: false, term: 0}})
+            start := time.Now()
+            n.Start()
+            defer n.Stop()
+            for n.State() == Follower {
+                time.Sleep(2 * time.Millisecond)
+            }
+            fires[i] = time.Since(start)
+        }(i)
+    }
+    wg.Wait()
+    // All firings must be >= base, and not all identical.
+    var min, max time.Duration = fires[0], fires[0]
+    for _, f := range fires {
+        if f < base {
+            t.Errorf("fired before configured minimum: %v < %v", f, base)
+        }
+        if f < min { min = f }
+        if f > max { max = f }
+    }
+    if max-min < 5*time.Millisecond {
+        t.Errorf("election timeouts look fixed (spread %v); expected randomization", max-min)
+    }
+}
+
+Go Concepts to Cover
+
+- Non-blocking channel send: `select { case ch <- v: default: }`
+- State guards inside a run loop: check `node.state` before acting on a timer event
+- math/rand for jittered durations; seeded once at process start (or per-node if preferred)
+- Idiomatic step-down: a single helper `becomeFollower(term uint64)` that resets state, term, and votedFor under the lock
+- log.Printf for peer-RPC errors (avoid swallowing diagnostics)
+
+What to modify
+
+- kvstore/raft.go
+  - Add `votedFor string` to the node struct; clear in becomeFollower.
+  - Add `becomeFollower(term uint64)` helper (caller holds the lock or method takes it — pick one and stick to it).
+  - In Start's select loop: when timeoutTimer fires, only call startElection if state != Leader.
+  - In startElection: while collecting responses, if any resp.Term > node.term, call becomeFollower(resp.Term) and return without promoting to Leader.
+  - In HandleRequestVote: implement the votedFor logic above.
+  - In ReceiveHeartbeat: use a non-blocking send.
+  - Replace `time.NewTimer(node.electionTimeout)` with a helper that returns `node.electionTimeout + jitter`, where jitter is uniform in [0, electionTimeout). Apply on initial creation and on every Reset.
+
+- kvstore/raft_test.go
+  - Add the six tests above.
+
+Verification
+
+cd /workspace/kvstore
+go test -race ./...
+
+All previous tests plus the six new ones pass. No new TODOs introduced.
+
+Hints available
+
+Yes - ask if stuck on the votedFor reset rule, the step-down race in startElection, or the timer-jitter helper.
+
