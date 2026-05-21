@@ -255,122 +255,130 @@ func TestSingleNodeCluster_BecomesLeader(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Task 5
+// =============================================================================
+
 func TestReceiveHeartbeat_BeforeStart_DoesNotBlock(t *testing.T) {
-    node := NewRaftNode("node1")
-    done := make(chan struct{})
-    go func() {
-        node.ReceiveHeartbeat(0)
-        close(done)
-    }()
-    select {
-    case <-done:
-    case <-time.After(100 * time.Millisecond):
-        t.Fatal("ReceiveHeartbeat blocked when Start had not been called")
-    }
+	node := NewRaftNode("node1")
+	done := make(chan struct{})
+	go func() {
+		node.ReceiveHeartbeat(0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("ReceiveHeartbeat blocked when Start had not been called")
+	}
 }
 
 func TestLeader_DoesNotStartNewElection(t *testing.T) {
-    node := NewRaftNode("node1")
-    node.SetElectionTimeout(50 * time.Millisecond)
-    node.SetPeers([]Peer{
-        &mockPeer{voteGranted: true, term: 1},
-        &mockPeer{voteGranted: true, term: 1},
-    })
-    node.Start()
-    defer node.Stop()
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond)
+	node.SetPeers([]Peer{
+		&mockPeer{voteGranted: true, term: 1},
+		&mockPeer{voteGranted: true, term: 1},
+	})
+	node.Start()
+	defer node.Stop()
 
-    // Wait until Leader.
-    deadline := time.After(500 * time.Millisecond)
-    for node.State() != Leader {
-        select {
-        case <-deadline:
-            t.Fatal("never became Leader")
-        case <-time.After(5 * time.Millisecond):
-        }
-    }
-    leaderTerm := node.CurrentTerm()
+	// Wait until Leader.
+	deadline := time.After(500 * time.Millisecond)
+	for node.State() != Leader {
+		select {
+		case <-deadline:
+			t.Fatal("never became Leader")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	leaderTerm := node.CurrentTerm()
 
-    // Sleep well past several election timeouts.
-    time.Sleep(300 * time.Millisecond)
+	// Sleep well past several election timeouts.
+	time.Sleep(300 * time.Millisecond)
 
-    if node.State() != Leader {
-        t.Errorf("Leader should not step down without external cause, got %v", node.State())
-    }
-    if node.CurrentTerm() != leaderTerm {
-        t.Errorf("Leader term advanced from %d to %d (phantom election)", leaderTerm, node.CurrentTerm())
-    }
+	if node.State() != Leader {
+		t.Errorf("Leader should not step down without external cause, got %v", node.State())
+	}
+	if node.CurrentTerm() != leaderTerm {
+		t.Errorf("Leader term advanced from %d to %d (phantom election)", leaderTerm, node.CurrentTerm())
+	}
 }
 
 func TestCandidate_StepsDown_OnHigherTermResponse(t *testing.T) {
-    node := NewRaftNode("node1")
-    node.SetElectionTimeout(50 * time.Millisecond)
-    node.SetPeers([]Peer{
-        &mockPeer{voteGranted: false, term: 99},
-        &mockPeer{voteGranted: false, term: 99},
-    })
-    node.Start()
-    defer node.Stop()
+	node := NewRaftNode("node1")
+	node.SetElectionTimeout(50 * time.Millisecond)
+	node.SetPeers([]Peer{
+		&mockPeer{voteGranted: false, term: 99},
+		&mockPeer{voteGranted: false, term: 99},
+	})
+	node.Start()
+	defer node.Stop()
 
-    time.Sleep(150 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 
-    if node.State() != Follower {
-        t.Errorf("should step down to Follower on higher-term response, got %v", node.State())
-    }
-    if node.CurrentTerm() != 99 {
-        t.Errorf("should adopt peer term 99, got %d", node.CurrentTerm())
-    }
+	if node.State() != Follower {
+		t.Errorf("should step down to Follower on higher-term response, got %v", node.State())
+	}
+	if node.CurrentTerm() != 99 {
+		t.Errorf("should adopt peer term 99, got %d", node.CurrentTerm())
+	}
 }
 
 func TestRequestVote_SameTerm_DifferentCandidate_Denied(t *testing.T) {
-    node := NewRaftNode("node1")
-    node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
-    resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node3"})
-    if resp.VoteGranted {
-        t.Error("should deny: already voted for node2 in term 5")
-    }
+	node := NewRaftNode("node1")
+	node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
+	resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node3"})
+	if resp.VoteGranted {
+		t.Error("should deny: already voted for node2 in term 5")
+	}
 }
 
 func TestRequestVote_SameTerm_SameCandidate_Granted(t *testing.T) {
-    node := NewRaftNode("node1")
-    node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
-    resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
-    if !resp.VoteGranted {
-        t.Error("re-vote for same candidate at same term must be idempotent")
-    }
+	node := NewRaftNode("node1")
+	node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
+	resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
+	if !resp.VoteGranted {
+		t.Error("re-vote for same candidate at same term must be idempotent")
+	}
 }
 
 func TestElectionTimeout_IsRandomized(t *testing.T) {
-    const N = 20
-    base := 80 * time.Millisecond
-    fires := make([]time.Duration, N)
-    var wg sync.WaitGroup
-    for i := 0; i < N; i++ {
-        wg.Add(1)
-        go func(i int) {
-            defer wg.Done()
-            n := NewRaftNode("n")
-            n.SetElectionTimeout(base)
-            n.SetPeers([]Peer{&mockPeer{voteGranted: false, term: 0}, &mockPeer{voteGranted: false, term: 0}})
-            start := time.Now()
-            n.Start()
-            defer n.Stop()
-            for n.State() == Follower {
-                time.Sleep(2 * time.Millisecond)
-            }
-            fires[i] = time.Since(start)
-        }(i)
-    }
-    wg.Wait()
-    // All firings must be >= base, and not all identical.
-    var min, max time.Duration = fires[0], fires[0]
-    for _, f := range fires {
-        if f < base {
-            t.Errorf("fired before configured minimum: %v < %v", f, base)
-        }
-        if f < min { min = f }
-        if f > max { max = f }
-    }
-    if max-min < 5*time.Millisecond {
-        t.Errorf("election timeouts look fixed (spread %v); expected randomization", max-min)
-    }
+	const N = 20
+	base := 80 * time.Millisecond
+	fires := make([]time.Duration, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			n := NewRaftNode("n")
+			n.SetElectionTimeout(base)
+			n.SetPeers([]Peer{&mockPeer{voteGranted: false, term: 0}, &mockPeer{voteGranted: false, term: 0}})
+			start := time.Now()
+			n.Start()
+			defer n.Stop()
+			for n.State() == Follower {
+				time.Sleep(2 * time.Millisecond)
+			}
+			fires[i] = time.Since(start)
+		}(i)
+	}
+	wg.Wait()
+	// All firings must be >= base, and not all identical.
+	var min, max time.Duration = fires[0], fires[0]
+	for _, f := range fires {
+		if f < base {
+			t.Errorf("fired before configured minimum: %v < %v", f, base)
+		}
+		if f < min {
+			min = f
+		}
+		if f > max {
+			max = f
+		}
+	}
+	if max-min < 5*time.Millisecond {
+		t.Errorf("election timeouts look fixed (spread %v); expected randomization", max-min)
+	}
 }
