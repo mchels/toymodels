@@ -145,8 +145,12 @@ func (node *node) startElection() {
 }
 
 func (node *node) ReceiveHeartbeat(term uint64) {
-	// TODO: This blocks forever if Start hasn't been called.
-	node.heartbeatChan <- term
+	// If we do a standard blocking send and Start has NOT been called, this method blocks forever.
+	// Therefore, we do a non-blocking send.
+	select {
+	case node.heartbeatChan <- term:
+	default:
+	}
 }
 
 func (node *node) SetElectionTimeout(timeout time.Duration) {
