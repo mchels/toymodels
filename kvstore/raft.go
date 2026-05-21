@@ -93,15 +93,21 @@ func (node *node) Stop() {
 	node.mu.Unlock()
 }
 
+type requestVoteResult struct {
+	term         uint64
+	vote_granted bool
+}
+
 func (node *node) startElection() {
 	node.mu.Lock()
 	node.state = Candidate
 	node.term++
 	nVotes := 1 // Start out by voting for self.
+	maxTermObserved := node.term
 	var wg sync.WaitGroup
 	// TODO: How to pass responses and error on a channel? Simple option: Wrap in a struct.
 	// TODO: What should we do on errors, actually? Right now we just ignore them.
-	results := make(chan bool)
+	voteResults := make(chan requestVoteResult)
 	nVotesRequired := (len(node.peers)+1)/2 + 1
 	for _, peer := range node.peers {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -118,9 +124,10 @@ func (node *node) startElection() {
 				// TODO: Handle
 			}
 			if resp != nil {
-				results <- resp.VoteGranted
-			} else {
-				results <- false
+				voteResults <- requestVoteResult{
+					term:         resp.Term,
+					vote_granted: resp.VoteGranted,
+				}
 			}
 		}(peer)
 	}
@@ -128,14 +135,27 @@ func (node *node) startElection() {
 
 	go func() {
 		wg.Wait()
-		close(results)
+		close(voteResults)
 	}()
 
-	for granted := range results {
-		if granted {
+	for result := range voteResults {
+		if result.vote_granted {
 			nVotes++
 		}
+		if result.term > maxTermObserved {
+			maxTermObserved = result.term
+		}
 	}
+
+	node.mu.Lock()
+	if maxTermObserved > node.term {
+		// Abort election since a peer was found that has a higher term than this node.
+		node.term = maxTermObserved
+		node.state = Follower
+		node.mu.Unlock()
+		return
+	}
+	node.mu.Unlock()
 
 	if nVotes >= nVotesRequired {
 		node.mu.Lock()
