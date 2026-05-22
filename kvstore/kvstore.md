@@ -1050,3 +1050,15 @@ This is a sketch of the remaining tasks to reach a complete pedagogical Raft toy
 Dive deep on 6–9. Read 10 conceptually. Skip 11–12 unless interest pulls us back. Reaching the end of Task 9 means we could read the etcd `raft` package and follow it.
 
 It's OK to deviate from this plan as understanding grows.
+
+---
+
+# Notes / Possible Future Refactors
+
+## Actor-model state ownership
+
+Currently `node.state`, `node.term`, `node.votedFor` are shared mutable fields guarded by `node.mu`. RPC handlers (`HandleRequestVote`, `HandleAppendEntries`) mutate them directly, racing with the run-loop goroutines (`runFollower`/`runCandidate`/`runLeader`). The current mitigation is "verify state under lock at every decision point", which is correct but sprinkled across the code.
+
+A cleaner design has a single writer for state. RPC handlers become thin: they package the request and a reply channel, push it onto a request channel, and block on the reply. The run-loop goroutines `select` on that channel alongside their timers, decide the response, mutate state without contention, and send the reply back. `node.mu` shrinks to protecting only fields read by external observers (`State()`, `CurrentTerm()`).
+
+Trade-off: the gRPC handler must wait synchronously on the reply channel (gRPC is request/response), which adds plumbing. Worthwhile once leader election + heartbeats + log replication all race on the same fields — probably around Task 7. Not worth doing earlier.
