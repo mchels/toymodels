@@ -106,7 +106,6 @@ func (node *node) startElection() {
 	nVotes := 1 // Start out by voting for self.
 	maxTermObserved := node.term
 	var wg sync.WaitGroup
-	// TODO: How to pass responses and error on a channel? Simple option: Wrap in a struct.
 	// TODO: What should we do on errors, actually? Right now we just ignore them.
 	voteResults := make(chan requestVoteResult)
 	nVotesRequired := (len(node.peers)+1)/2 + 1
