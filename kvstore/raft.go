@@ -78,50 +78,54 @@ func (node *node) SetPeers(peers []Peer) {
 func (node *node) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	node.mu.Lock()
-	timeoutTimer := time.NewTimer(drawRandomTimeout(node.electionTimeout))
 	if node.cancel != nil {
 		node.cancel()
 	}
 	node.cancel = cancel
 	node.mu.Unlock()
-	go func(ctx context.Context) {
-		for {
-			select {
-			case <-timeoutTimer.C:
-				if node.State() != Leader {
-					node.startElection()
-				}
-			case <-node.heartbeatChan:
-				// TODO do something with received term. To be handled in Task 6.
-				if node.State() != Leader {
-					timeoutTimer.Reset(drawRandomTimeout(node.electionTimeout))
-				}
-			case <-ctx.Done():
-				timeoutTimer.Stop()
-				return
-			}
+	go node.run(ctx)
+}
+
+func (node *node) run(ctx context.Context) {
+	for ctx.Err() == nil {
+		switch node.State() {
+		case Follower:
+			node.runFollower(ctx)
+		case Candidate:
+			node.runCandidate(ctx)
+		case Leader:
+			node.runLeader(ctx)
 		}
-	}(ctx)
-}
-
-func (node *node) Stop() {
-	node.mu.Lock()
-	if node.cancel != nil {
-		node.cancel()
 	}
-	node.mu.Unlock()
 }
 
-type requestVoteResult struct {
-	term        uint64
-	voteGranted bool
+func (node *node) runFollower(ctx context.Context) {
+	electionTimer := time.NewTimer(drawRandomTimeout(node.electionTimeout))
+	for {
+		select {
+		case <-electionTimer.C:
+			node.mu.Lock()
+			node.state = Candidate
+			node.term = node.term + 1
+			node.votedFor = node.name
+			node.mu.Unlock()
+			return
+		case <-node.heartbeatChan:
+			// TODO do something with received term. To be handled in Task 6.
+			electionTimer.Reset(drawRandomTimeout(node.electionTimeout))
+		case <-ctx.Done():
+			electionTimer.Stop()
+			return
+		}
+	}
 }
 
-func (node *node) startElection() {
+func (node *node) runCandidate(ctx context.Context) {
 	node.mu.Lock()
-	node.state = Candidate
-	node.term = node.term + 1
-	node.votedFor = node.name
+	if node.state != Candidate {
+		node.mu.Unlock()
+		return
+	}
 	nVotes := 1 // Start out by voting for self.
 	maxTermObserved := node.term
 	var wg sync.WaitGroup
@@ -185,6 +189,33 @@ func (node *node) startElection() {
 	if nVotes >= nVotesRequired && node.term == electionTerm && node.state == Candidate {
 		node.state = Leader
 	}
+
+	// No one gained majority so `node` is still Candidate. Wait for a bit until having a new
+	// election.
+	select {
+	case <-time.After(drawRandomTimeout(node.electionTimeout)):
+		return
+	case <-ctx.Done():
+		return
+	}
+}
+
+func (node *node) runLeader(ctx context.Context) {
+	// Broadcast heartbeats
+	// Generally, later: AppendEntries
+}
+
+func (node *node) Stop() {
+	node.mu.Lock()
+	if node.cancel != nil {
+		node.cancel()
+	}
+	node.mu.Unlock()
+}
+
+type requestVoteResult struct {
+	term        uint64
+	voteGranted bool
 }
 
 func (node *node) ReceiveHeartbeat(term uint64) {

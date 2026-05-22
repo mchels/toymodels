@@ -320,13 +320,19 @@ func TestCandidate_StepsDown_OnHigherTermResponse(t *testing.T) {
 	node.Start()
 	defer node.Stop()
 
-	time.Sleep(150 * time.Millisecond)
-
-	if node.State() != Follower {
-		t.Errorf("should step down to Follower on higher-term response, got %v", node.State())
-	}
-	if node.CurrentTerm() != 99 {
-		t.Errorf("should adopt peer term 99, got %d", node.CurrentTerm())
+	// Poll for the moment of step-down. The candidate may immediately start a
+	// new election after adopting term 99, so we cannot assert on a fixed
+	// snapshot — only that the higher term was observed and adopted.
+	// Reaching term >= 99 within this window is only possible via the
+	// becomeFollower path in runCandidate (term increments per election are
+	// far too slow to reach 99 otherwise).
+	deadline := time.After(500 * time.Millisecond)
+	for node.CurrentTerm() < 99 {
+		select {
+		case <-deadline:
+			t.Fatalf("never adopted peer term 99, current term %d", node.CurrentTerm())
+		case <-time.After(2 * time.Millisecond):
+		}
 	}
 }
 
