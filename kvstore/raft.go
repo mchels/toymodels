@@ -24,6 +24,7 @@ type node struct {
 	name            string
 	state           NodeState
 	term            uint64
+	votedFor        *string
 	electionTimeout time.Duration
 	heartbeatChan   chan uint64
 	cancel          context.CancelFunc
@@ -101,7 +102,7 @@ type requestVoteResult struct {
 func (node *node) startElection() {
 	node.mu.Lock()
 	node.state = Candidate
-	node.term++
+	node.setTerm(node.term + 1)
 	nVotes := 1 // Start out by voting for self.
 	maxTermObserved := node.term
 	var wg sync.WaitGroup
@@ -150,7 +151,7 @@ func (node *node) startElection() {
 	node.mu.Lock()
 	if maxTermObserved > node.term {
 		// Abort election since a peer was found that has a higher term than this node.
-		node.term = maxTermObserved
+		node.setTerm(maxTermObserved)
 		node.state = Follower
 		node.mu.Unlock()
 		return
@@ -183,10 +184,18 @@ func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.Reques
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if req.Term > node.term {
-		node.term = req.Term
+		node.setTerm(req.Term)
 		node.state = Follower
+		node.votedFor = &req.CandidateId
 		return &proto.RequestVoteResponse{
 			Term:        req.Term,
+			VoteGranted: true,
+		}
+	}
+	// req.CandidateId == *node.votedFor ensures idempotency if we've already voted for `peer`.
+	if req.Term == node.term && (node.votedFor == nil || req.CandidateId == *node.votedFor) {
+		return &proto.RequestVoteResponse{
+			Term:        node.term,
 			VoteGranted: true,
 		}
 	}
@@ -194,4 +203,10 @@ func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.Reques
 		Term:        node.term,
 		VoteGranted: false,
 	}
+}
+
+// Caller must do node.mu.Lock()
+func (node *node) setTerm(term uint64) {
+	node.term = term
+	node.votedFor = nil
 }
