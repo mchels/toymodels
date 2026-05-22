@@ -766,3 +766,259 @@ Hints available
 
 Yes - ask if stuck on the votedFor reset rule, the step-down race in startElection, or the timer-jitter helper.
 
+---
+
+# Task 6: Heartbeats and a Per-State Run Loop
+
+Concept
+
+A Leader holds authority by sending periodic AppendEntries RPCs (empty = heartbeat) to all peers. Without heartbeats, followers' election timers fire and a new election starts. This task adds the heartbeat path and refactors the run loop so each role owns its own goroutine, eliminating the `if state != Leader` guards that started accumulating in Task 5.
+
+This teaches:
+- AppendEntries RPC (heartbeat-only form; log replication is Task 7)
+- Per-role goroutines as a state-machine pattern (`runFollower`, `runCandidate`, `runLeader`)
+- Decoupling RPC dispatch from state mutation (`requestVotes()` returns an outcome; the role loop decides the transition)
+- Heartbeat interval vs. election timeout invariant
+
+Background
+
+In Raft, AppendEntries serves two purposes: replicating log entries (later) and acting as the leader's heartbeat (now). A follower that receives a valid AppendEntries resets its election timer. A candidate that receives an AppendEntries from a leader at term >= its own steps down to Follower. The heartbeat interval must be well below the election timeout — typically `heartbeatInterval ~ electionTimeout / 5`.
+
+Requirements
+
+1. Add `AppendEntries(ctx, req)` to the `Peer` interface. The proto carries `term` and `leader_id` for now.
+2. The Leader sends `AppendEntries` to every peer every `heartbeatInterval` (constructor param, e.g., 50ms when election timeout is 250ms). All peer calls dispatched concurrently, not sequentially.
+3. A Leader that observes any peer response with `Term > currentTerm` steps down to Follower at the new term and stops sending heartbeats.
+4. `HandleAppendEntries(req)` on a node:
+   - If `req.Term < currentTerm`: reply `{Term: currentTerm, Success: false}`, no state change.
+   - If `req.Term > currentTerm`: become Follower at `req.Term`.
+   - If `req.Term == currentTerm` and state is Candidate: become Follower at the same term (a leader exists for this term).
+   - In all accept paths: reset the election timer (signal via `heartbeatChan`).
+   - Reply `{Term: currentTerm, Success: true}` on accept.
+5. Refactor `Start` to a per-role driver:
+   ```go
+   func (n *node) run(ctx context.Context) {
+       for ctx.Err() == nil {
+           switch n.State() {
+           case Follower:  n.runFollower(ctx)
+           case Candidate: n.runCandidate(ctx)
+           case Leader:    n.runLeader(ctx)
+           }
+       }
+   }
+   ```
+   Each `runX` blocks until its role ends, then returns. No `if state != Leader` checks remain in any select case.
+6. `startElection` is split: a pure `requestVotes()` that issues the RPCs and returns a tally; `runCandidate` interprets the tally and transitions.
+7. Tests run with `-race` and pass.
+
+Proto additions
+
+Add to `proto/raft.proto`:
+
+```protobuf
+service Raft {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+message AppendEntriesRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
+}
+```
+
+Regenerate with `protoc --go_out=. --go-grpc_out=. proto/raft.proto`.
+
+Test file: kvstore/raft_test.go
+
+Update `mockPeer` to satisfy the extended `Peer` interface (record `AppendEntries` calls):
+
+```go
+type mockPeer struct {
+    voteGranted   bool
+    term          uint64
+    appendCalls   atomic.Int64
+    mu            sync.Mutex
+}
+
+func (m *mockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    return &proto.RequestVoteResponse{Term: m.term, VoteGranted: m.voteGranted}, nil
+}
+
+func (m *mockPeer) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
+    m.appendCalls.Add(1)
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    return &proto.AppendEntriesResponse{Term: m.term, Success: true}, nil
+}
+```
+
+Make these tests pass:
+
+```go
+func TestLeader_SendsHeartbeats(t *testing.T) {
+    node := NewRaftNode("node1", 250*time.Millisecond, 50*time.Millisecond)
+    p1 := &mockPeer{voteGranted: true, term: 1}
+    p2 := &mockPeer{voteGranted: true, term: 1}
+    node.SetPeers([]Peer{p1, p2})
+    node.Start()
+    defer node.Stop()
+
+    // Wait for Leader.
+    deadline := time.After(1 * time.Second)
+    for node.State() != Leader {
+        select {
+        case <-deadline:
+            t.Fatal("never became Leader")
+        case <-time.After(5 * time.Millisecond):
+        }
+    }
+    // Within ~3 heartbeat intervals, expect >= 3 AppendEntries calls per peer.
+    time.Sleep(180 * time.Millisecond)
+    if p1.appendCalls.Load() < 3 || p2.appendCalls.Load() < 3 {
+        t.Errorf("expected >=3 heartbeats per peer, got p1=%d p2=%d",
+            p1.appendCalls.Load(), p2.appendCalls.Load())
+    }
+}
+
+func TestLeader_StepsDown_OnHigherTermAppendResponse(t *testing.T) {
+    node := NewRaftNode("node1", 100*time.Millisecond, 25*time.Millisecond)
+    // Peers grant votes at term 1, then start replying with a higher term.
+    p1 := &mockPeer{voteGranted: true, term: 1}
+    p2 := &mockPeer{voteGranted: true, term: 1}
+    node.SetPeers([]Peer{p1, p2})
+    node.Start()
+    defer node.Stop()
+
+    for node.State() != Leader {
+        time.Sleep(5 * time.Millisecond)
+    }
+    // Bump peer term to force step-down on next heartbeat response.
+    p1.mu.Lock(); p1.term = 99; p1.mu.Unlock()
+    p2.mu.Lock(); p2.term = 99; p2.mu.Unlock()
+
+    deadline := time.After(500 * time.Millisecond)
+    for node.State() == Leader {
+        select {
+        case <-deadline:
+            t.Fatal("Leader did not step down on higher-term response")
+        case <-time.After(5 * time.Millisecond):
+        }
+    }
+    if node.State() != Follower {
+        t.Errorf("expected Follower after step-down, got %v", node.State())
+    }
+    if node.CurrentTerm() != 99 {
+        t.Errorf("expected term 99 after step-down, got %d", node.CurrentTerm())
+    }
+}
+
+func TestFollower_ResetsTimer_OnAppendEntries(t *testing.T) {
+    node := NewRaftNode("node1", 100*time.Millisecond, 25*time.Millisecond)
+    node.SetPeers([]Peer{&mockPeer{}, &mockPeer{}})
+    node.Start()
+    defer node.Stop()
+
+    // Heartbeat faster than election timeout for 300ms total.
+    for i := 0; i < 6; i++ {
+        time.Sleep(50 * time.Millisecond)
+        node.HandleAppendEntries(&proto.AppendEntriesRequest{Term: 1, LeaderId: "leader"})
+    }
+    if node.State() != Follower {
+        t.Errorf("AppendEntries should keep Follower, got %v", node.State())
+    }
+    if node.CurrentTerm() != 1 {
+        t.Errorf("expected term 1 after AppendEntries, got %d", node.CurrentTerm())
+    }
+}
+
+func TestCandidate_StepsDown_OnAppendEntries(t *testing.T) {
+    node := NewRaftNode("node1", 50*time.Millisecond, 25*time.Millisecond)
+    // Peers deny votes so node stays Candidate.
+    node.SetPeers([]Peer{
+        &mockPeer{voteGranted: false, term: 0},
+        &mockPeer{voteGranted: false, term: 0},
+    })
+    node.Start()
+    defer node.Stop()
+
+    for node.State() != Candidate {
+        time.Sleep(5 * time.Millisecond)
+    }
+    candidateTerm := node.CurrentTerm()
+
+    // A leader at the same term sends AppendEntries.
+    resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{
+        Term: candidateTerm, LeaderId: "leader",
+    })
+    if !resp.Success {
+        t.Errorf("AppendEntries at same term should be accepted by Candidate")
+    }
+    // Give runCandidate a moment to observe the state change.
+    time.Sleep(20 * time.Millisecond)
+    if node.State() != Follower {
+        t.Errorf("Candidate should step down on AppendEntries, got %v", node.State())
+    }
+}
+
+func TestHandleAppendEntries_RejectsLowerTerm(t *testing.T) {
+    node := NewRaftNode("node1", 250*time.Millisecond, 50*time.Millisecond)
+    node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "x"})
+    resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{Term: 4, LeaderId: "stale"})
+    if resp.Success {
+        t.Error("AppendEntries from lower term must be rejected")
+    }
+    if resp.Term != 5 {
+        t.Errorf("response should carry currentTerm=5, got %d", resp.Term)
+    }
+}
+```
+
+Adapt earlier tests to the new constructor signature `NewRaftNode(name, electionTimeout, heartbeatInterval)`. Drop calls to `SetElectionTimeout`.
+
+Go Concepts to Cover
+
+- Per-role goroutines: each `runX` is a small select loop that returns when the role ends. The driver `run(ctx)` re-dispatches based on the new state.
+- Decoupling: `requestVotes()` is pure — it sends RPCs and returns a tally. `runCandidate` decides what to do with the tally.
+- `time.Ticker` for the leader's heartbeat cadence.
+- Reading state inside a role loop: reads still need the mutex; transitions should go through `becomeFollower` / `becomeLeader` helpers.
+- Atomic counters in tests: `atomic.Int64` for cheap call counts without mutex contention.
+
+What to modify
+
+- `kvstore/proto/raft.proto`
+  - Add `AppendEntries` RPC and messages. Regenerate.
+- `kvstore/raft.go`
+  - Extend `Peer` interface with `AppendEntries`.
+  - Add `heartbeatInterval time.Duration` field, set in constructor.
+  - Replace `SetElectionTimeout` with constructor param `NewRaftNode(name string, electionTimeout, heartbeatInterval time.Duration)`.
+  - Replace the single goroutine in `Start` with `run(ctx)` dispatching to `runFollower`, `runCandidate`, `runLeader`.
+  - `runFollower`: select on election timer + heartbeatChan + ctx; on timer, transition to Candidate and return.
+  - `runCandidate`: call `requestVotes()` (split out from old `startElection`), set Leader/Follower based on tally, return on any state change.
+  - `runLeader`: `time.Ticker` at `heartbeatInterval`; on each tick, fan out `AppendEntries` to peers. Inspect responses; on `Term > currentTerm`, `becomeFollower(term)` and return.
+  - Add `HandleAppendEntries(req) *AppendEntriesResponse` per requirement 4.
+  - Add `becomeLeader()` helper symmetric with `becomeFollower`.
+- `kvstore/raft_test.go`
+  - Update `mockPeer` to implement `AppendEntries`.
+  - Update existing test constructors to the new signature.
+  - Add the five tests above.
+
+Verification
+
+```
+cd /workspace/kvstore
+go test -race ./...
+```
+
+All previous tests pass under the new constructor, plus the five new ones. No `if state != Leader` guards remain in `raft.go`.
+
+Hints available
+
+Yes — ask if stuck on the role-loop teardown (how `runX` returns cleanly), the heartbeat fan-out pattern, or the AppendEntries / step-down race.
