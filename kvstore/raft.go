@@ -3,6 +3,7 @@ package kvstore
 import (
 	"context"
 	"kvstore/proto"
+	"log"
 	"sync"
 	"time"
 )
@@ -121,7 +122,10 @@ func (node *node) startElection() {
 			defer wg.Done()
 			resp, err := p.RequestVote(ctx, req)
 			if err != nil {
-				// TODO: Handle
+				// We only halt execution on errors we do not understand. Errors from RequestVote
+				// might be due to transient effect, e.g., network etc. which we do understand so
+				// we do not halt here.
+				log.Println("error:", err)
 			}
 			if resp != nil {
 				voteResults <- requestVoteResult{
