@@ -26,7 +26,7 @@ type node struct {
 	name            string
 	state           NodeState
 	term            uint64
-	votedFor        *string
+	votedFor        string
 	electionTimeout time.Duration
 	heartbeatChan   chan uint64
 	cancel          context.CancelFunc
@@ -41,6 +41,9 @@ func drawRandomTimeout(baseTimeout time.Duration) time.Duration {
 }
 
 func NewRaftNode(name string, electionTimeout time.Duration) *node {
+	if name == "" {
+		panic("Node name must not be empty")
+	}
 	if electionTimeout == 0 {
 		electionTimeout = defaultElectionTimeout
 	}
@@ -85,12 +88,12 @@ func (node *node) Start() {
 		for {
 			select {
 			case <-timeoutTimer.C:
-				if node.state != Leader {
+				if node.State() != Leader {
 					node.startElection()
 				}
 			case <-node.heartbeatChan:
-				// TODO do something with received term.
-				if node.state != Leader {
+				// TODO do something with received term. To be handled in Task 6.
+				if node.State() != Leader {
 					timeoutTimer.Reset(drawRandomTimeout(node.electionTimeout))
 				}
 			case <-ctx.Done():
@@ -110,23 +113,23 @@ func (node *node) Stop() {
 }
 
 type requestVoteResult struct {
-	term         uint64
-	vote_granted bool
+	term        uint64
+	voteGranted bool
 }
 
 func (node *node) startElection() {
 	node.mu.Lock()
 	node.state = Candidate
-	node.setTerm(node.term + 1)
+	node.term = node.term + 1
+	node.votedFor = node.name
 	nVotes := 1 // Start out by voting for self.
 	maxTermObserved := node.term
 	var wg sync.WaitGroup
-	// TODO: What should we do on errors, actually? Right now we just ignore them.
 	voteResults := make(chan requestVoteResult)
 	nVotesRequired := (len(node.peers)+1)/2 + 1
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	for _, peer := range node.peers {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		req := &proto.RequestVoteRequest{
 			Term:        node.term,
 			CandidateId: node.name,
@@ -140,15 +143,20 @@ func (node *node) startElection() {
 				// might be due to transient effect, e.g., network etc. which we do understand so
 				// we do not halt here.
 				log.Println("error:", err)
+				voteResults <- requestVoteResult{
+					term:        node.term,
+					voteGranted: false,
+				}
 			}
 			if resp != nil {
 				voteResults <- requestVoteResult{
-					term:         resp.Term,
-					vote_granted: resp.VoteGranted,
+					term:        resp.Term,
+					voteGranted: resp.VoteGranted,
 				}
 			}
 		}(peer)
 	}
+	electionTerm := node.term
 	node.mu.Unlock()
 
 	go func() {
@@ -157,7 +165,7 @@ func (node *node) startElection() {
 	}()
 
 	for result := range voteResults {
-		if result.vote_granted {
+		if result.voteGranted {
 			nVotes++
 		}
 		if result.term > maxTermObserved {
@@ -166,19 +174,16 @@ func (node *node) startElection() {
 	}
 
 	node.mu.Lock()
+	defer node.mu.Unlock()
 	if maxTermObserved > node.term {
 		// Abort election since a peer was found that has a higher term than this node.
-		node.setTerm(maxTermObserved)
-		node.state = Follower
-		node.mu.Unlock()
+		node.becomeFollower(maxTermObserved)
 		return
 	}
-	node.mu.Unlock()
 
-	if nVotes >= nVotesRequired {
-		node.mu.Lock()
+	// Check that node wasn't bumped down to Follower with a RequestVote since we unlocked above.
+	if nVotes >= nVotesRequired && node.term == electionTerm && node.state == Candidate {
 		node.state = Leader
-		node.mu.Unlock()
 	}
 }
 
@@ -195,16 +200,15 @@ func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.Reques
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	if req.Term > node.term {
-		node.setTerm(req.Term)
-		node.state = Follower
-		node.votedFor = &req.CandidateId
+		node.becomeFollower(req.Term)
+		node.votedFor = req.CandidateId
 		return &proto.RequestVoteResponse{
 			Term:        req.Term,
 			VoteGranted: true,
 		}
 	}
-	// req.CandidateId == *node.votedFor ensures idempotency if we've already voted for `peer`.
-	if req.Term == node.term && (node.votedFor == nil || req.CandidateId == *node.votedFor) {
+	// req.CandidateId == node.votedFor ensures idempotency if we've already voted for `peer`.
+	if req.Term == node.term && (node.votedFor == "" || req.CandidateId == node.votedFor) {
 		return &proto.RequestVoteResponse{
 			Term:        node.term,
 			VoteGranted: true,
@@ -217,7 +221,8 @@ func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.Reques
 }
 
 // Caller must do node.mu.Lock()
-func (node *node) setTerm(term uint64) {
+func (node *node) becomeFollower(term uint64) {
 	node.term = term
-	node.votedFor = nil
+	node.votedFor = ""
+	node.state = Follower
 }

@@ -386,3 +386,14 @@ func TestElectionTimeout_IsRandomized(t *testing.T) {
 		t.Errorf("election timeouts look fixed (spread %v); expected randomization", max-min)
 	}
 }
+
+func TestNoEmptyName(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Errorf("Empty name construction did not raise panic")
+		}
+	}()
+
+	NewRaftNode("", 0)
+}
