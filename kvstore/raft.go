@@ -4,6 +4,7 @@ import (
 	"context"
 	"kvstore/proto"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -33,12 +34,21 @@ type node struct {
 	mu              sync.Mutex
 }
 
-func NewRaftNode(name string) *node {
+const defaultElectionTimeout time.Duration = 300 * time.Millisecond
+
+func drawRandomTimeout(baseTimeout time.Duration) time.Duration {
+	return time.Duration(float64(baseTimeout) * (1 + rand.Float64()))
+}
+
+func NewRaftNode(name string, electionTimeout time.Duration) *node {
+	if electionTimeout == 0 {
+		electionTimeout = defaultElectionTimeout
+	}
 	return &node{
 		name:            name,
 		state:           Follower,
 		term:            0,
-		electionTimeout: 300 * time.Millisecond,
+		electionTimeout: electionTimeout,
 		heartbeatChan:   make(chan uint64),
 		peers:           []Peer{},
 	}
@@ -65,7 +75,7 @@ func (node *node) SetPeers(peers []Peer) {
 func (node *node) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	node.mu.Lock()
-	timeoutTimer := time.NewTimer(node.electionTimeout)
+	timeoutTimer := time.NewTimer(drawRandomTimeout(node.electionTimeout))
 	if node.cancel != nil {
 		node.cancel()
 	}
@@ -78,7 +88,7 @@ func (node *node) Start() {
 				node.startElection()
 			case <-node.heartbeatChan:
 				// TODO do something with received term.
-				timeoutTimer.Reset(node.electionTimeout)
+				timeoutTimer.Reset(drawRandomTimeout(node.electionTimeout))
 			case <-ctx.Done():
 				timeoutTimer.Stop()
 				return
@@ -175,12 +185,6 @@ func (node *node) ReceiveHeartbeat(term uint64) {
 	case node.heartbeatChan <- term:
 	default:
 	}
-}
-
-func (node *node) SetElectionTimeout(timeout time.Duration) {
-	node.mu.Lock()
-	defer node.mu.Unlock()
-	node.electionTimeout = timeout
 }
 
 func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.RequestVoteResponse {

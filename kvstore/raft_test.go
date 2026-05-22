@@ -4,12 +4,13 @@ import (
 	"context"
 	"kvstore/proto"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestNewRaftNode(t *testing.T) {
-	node := NewRaftNode("node1")
+	node := NewRaftNode("node1", 0)
 
 	if node.State() != Follower {
 		t.Errorf("new node should be Follower, got %v", node.State())
@@ -20,7 +21,7 @@ func TestNewRaftNode(t *testing.T) {
 }
 
 func TestRequestVote_GrantsVote(t *testing.T) {
-	node := NewRaftNode("node1")
+	node := NewRaftNode("node1", 0)
 
 	resp := node.HandleRequestVote(&proto.RequestVoteRequest{
 		Term:        1,
@@ -36,7 +37,7 @@ func TestRequestVote_GrantsVote(t *testing.T) {
 }
 
 func TestRequestVote_DeniesVote_AlreadyVoted(t *testing.T) {
-	node := NewRaftNode("node1")
+	node := NewRaftNode("node1", 0)
 
 	// First vote granted
 	node.HandleRequestVote(&proto.RequestVoteRequest{Term: 1, CandidateId: "node2"})
@@ -50,8 +51,7 @@ func TestRequestVote_DeniesVote_AlreadyVoted(t *testing.T) {
 }
 
 func TestStop_TerminatesGoroutine(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(150 * time.Millisecond)
+	node := NewRaftNode("node1", 150*time.Millisecond)
 	node.Start()
 
 	time.Sleep(50 * time.Millisecond) // Let it start
@@ -65,8 +65,7 @@ func TestStop_TerminatesGoroutine(t *testing.T) {
 }
 
 func TestHeartbeat_ResetsElectionTimer(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(100 * time.Millisecond)
+	node := NewRaftNode("node1", 100*time.Millisecond)
 	node.Start()
 	defer node.Stop()
 
@@ -84,8 +83,7 @@ func TestHeartbeat_ResetsElectionTimer(t *testing.T) {
 
 func TestConcurrentAccess(t *testing.T) {
 	// Run with: go test -race
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
 	node.Start()
 	defer node.Stop()
 
@@ -135,15 +133,26 @@ func (m *mockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteReques
 	}, nil
 }
 
-// Slow peer for testing concurrency
+// Slow peer for testing concurrency. Tracks the maximum number of concurrent
+// in-flight RequestVote calls observed at this peer.
 type slowMockPeer struct {
 	delay       time.Duration
 	voteGranted bool
 	term        uint64
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
 }
 
 func (m *slowMockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+	n := m.inFlight.Add(1)
+	for {
+		old := m.maxInFlight.Load()
+		if n <= old || m.maxInFlight.CompareAndSwap(old, n) {
+			break
+		}
+	}
 	time.Sleep(m.delay)
+	m.inFlight.Add(-1)
 	return &proto.RequestVoteResponse{
 		Term:        m.term,
 		VoteGranted: m.voteGranted,
@@ -151,8 +160,7 @@ func (m *slowMockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRe
 }
 
 func TestCandidate_WinsMajority_BecomesLeader(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
 
 	// Two peers that will grant votes
 	peer1 := &mockPeer{voteGranted: true, term: 1}
@@ -170,8 +178,7 @@ func TestCandidate_WinsMajority_BecomesLeader(t *testing.T) {
 }
 
 func TestCandidate_NoMajority_StaysCandidate(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
 
 	// Two peers that deny votes
 	peer1 := &mockPeer{voteGranted: false, term: 1}
@@ -189,8 +196,7 @@ func TestCandidate_NoMajority_StaysCandidate(t *testing.T) {
 }
 
 func TestCandidate_PartialVotes_NeedsMajority(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
 
 	// 5-node cluster: need 3 votes for majority
 	peer1 := &mockPeer{voteGranted: true, term: 1}  // grants
@@ -211,38 +217,39 @@ func TestCandidate_PartialVotes_NeedsMajority(t *testing.T) {
 }
 
 func TestCandidate_VotesRequestedConcurrently(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
 
-	// Peers that take time to respond
-	slowPeer1 := &slowMockPeer{delay: 30 * time.Millisecond, voteGranted: true, term: 1}
-	slowPeer2 := &slowMockPeer{delay: 30 * time.Millisecond, voteGranted: true, term: 1}
+	// Peers that take time to respond. The delay must exceed the worst-case
+	// election-timer fire (2*electionTimeout with jitter) so that if calls
+	// were sequential, the second peer's call would not have started yet
+	// while the first is still in flight.
+	slowPeer1 := &slowMockPeer{delay: 200 * time.Millisecond, voteGranted: true, term: 1}
+	slowPeer2 := &slowMockPeer{delay: 200 * time.Millisecond, voteGranted: true, term: 1}
 	node.SetPeers([]Peer{slowPeer1, slowPeer2})
 
-	start := time.Now()
 	node.Start()
 	defer node.Stop()
 
-	deadline := time.After(200 * time.Millisecond)
-	for node.State() != Leader {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for Leader")
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-	elapsed := time.Since(start)
+	// Wait long enough for the timer to fire and both peers to be in flight
+	// concurrently (max election fire is 2*50ms; both calls should be active
+	// well before either returns at 200ms).
+	time.Sleep(150 * time.Millisecond)
 
-	// If concurrent: 50ms (timeout) + 30ms (parallel votes) ≈ 80ms
-	// If sequential: 50ms + 30ms + 30ms ≈ 110ms
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("votes appear sequential, took %v (expected < 100ms)", elapsed)
+	if slowPeer1.maxInFlight.Load() < 1 || slowPeer2.maxInFlight.Load() < 1 {
+		t.Fatalf("peers were not called: p1=%d p2=%d",
+			slowPeer1.maxInFlight.Load(), slowPeer2.maxInFlight.Load())
+	}
+	// Both peers in flight at the same instant is what concurrent dispatch means.
+	total := slowPeer1.maxInFlight.Load() + slowPeer2.maxInFlight.Load()
+	if total < 2 {
+		t.Errorf("votes appear sequential: max in-flight per peer p1=%d p2=%d (sum=%d, want >=2)",
+			slowPeer1.maxInFlight.Load(), slowPeer2.maxInFlight.Load(), total)
 	}
 }
 
 func TestSingleNodeCluster_BecomesLeader(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
+
 	node.SetPeers([]Peer{}) // No peers
 
 	node.Start()
@@ -260,7 +267,7 @@ func TestSingleNodeCluster_BecomesLeader(t *testing.T) {
 // =============================================================================
 
 func TestReceiveHeartbeat_BeforeStart_DoesNotBlock(t *testing.T) {
-	node := NewRaftNode("node1")
+	node := NewRaftNode("node1", 0)
 	done := make(chan struct{})
 	go func() {
 		node.ReceiveHeartbeat(0)
@@ -274,8 +281,7 @@ func TestReceiveHeartbeat_BeforeStart_DoesNotBlock(t *testing.T) {
 }
 
 func TestLeader_DoesNotStartNewElection(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
 	node.SetPeers([]Peer{
 		&mockPeer{voteGranted: true, term: 1},
 		&mockPeer{voteGranted: true, term: 1},
@@ -306,8 +312,7 @@ func TestLeader_DoesNotStartNewElection(t *testing.T) {
 }
 
 func TestCandidate_StepsDown_OnHigherTermResponse(t *testing.T) {
-	node := NewRaftNode("node1")
-	node.SetElectionTimeout(50 * time.Millisecond)
+	node := NewRaftNode("node1", 50*time.Millisecond)
 	node.SetPeers([]Peer{
 		&mockPeer{voteGranted: false, term: 99},
 		&mockPeer{voteGranted: false, term: 99},
@@ -326,7 +331,7 @@ func TestCandidate_StepsDown_OnHigherTermResponse(t *testing.T) {
 }
 
 func TestRequestVote_SameTerm_DifferentCandidate_Denied(t *testing.T) {
-	node := NewRaftNode("node1")
+	node := NewRaftNode("node1", 0)
 	node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
 	resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node3"})
 	if resp.VoteGranted {
@@ -335,7 +340,7 @@ func TestRequestVote_SameTerm_DifferentCandidate_Denied(t *testing.T) {
 }
 
 func TestRequestVote_SameTerm_SameCandidate_Granted(t *testing.T) {
-	node := NewRaftNode("node1")
+	node := NewRaftNode("node1", 0)
 	node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
 	resp := node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "node2"})
 	if !resp.VoteGranted {
@@ -352,8 +357,7 @@ func TestElectionTimeout_IsRandomized(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			n := NewRaftNode("n")
-			n.SetElectionTimeout(base)
+			n := NewRaftNode("n", base)
 			n.SetPeers([]Peer{&mockPeer{voteGranted: false, term: 0}, &mockPeer{voteGranted: false, term: 0}})
 			start := time.Now()
 			n.Start()
