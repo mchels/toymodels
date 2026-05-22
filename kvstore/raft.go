@@ -85,10 +85,14 @@ func (node *node) Start() {
 		for {
 			select {
 			case <-timeoutTimer.C:
-				node.startElection()
+				if node.state != Leader {
+					node.startElection()
+				}
 			case <-node.heartbeatChan:
 				// TODO do something with received term.
-				timeoutTimer.Reset(drawRandomTimeout(node.electionTimeout))
+				if node.state != Leader {
+					timeoutTimer.Reset(drawRandomTimeout(node.electionTimeout))
+				}
 			case <-ctx.Done():
 				timeoutTimer.Stop()
 				return
