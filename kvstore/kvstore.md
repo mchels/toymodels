@@ -1022,3 +1022,31 @@ All previous tests pass under the new constructor, plus the five new ones. No `i
 Hints available
 
 Yes — ask if stuck on the role-loop teardown (how `runX` returns cleanly), the heartbeat fan-out pattern, or the AppendEntries / step-down race.
+
+---
+
+# Tentative Plan: Tasks 7+
+
+This is a sketch of the remaining tasks to reach a complete pedagogical Raft toy model. Not binding — we can add, drop, reorder, or rescope as we learn what's interesting. Revisit before starting each task.
+
+## Core (must-have for a "decent, complete" model)
+
+**Task 7 — Log replication.** The heart of Raft. AppendEntries carries actual entries; introduce log matching (`prevLogIndex`/`prevLogTerm` consistency check), per-peer `nextIndex`/`matchIndex`, follower truncation on conflict, leader commit index advancing once replicated to majority. Add the election restriction to RequestVote (candidate's log must be at least as up-to-date as voter's). Longest task — Raft is mostly this.
+
+**Task 8 — Apply committed entries to the KV store.** Wire the Raft log to `store.go`. Leader proposes entries from gRPC `Put`/`Delete` calls, blocks until committed, then replies. A dedicated `applyLoop` drains committed entries into the state machine. Non-leaders redirect or return a "not leader, try X" error to the client.
+
+**Task 9 — Real gRPC transport between nodes.** Replace `mockPeer` with a `grpcPeer` that dials real addresses. Multi-process cluster runnable as `./server --id=n1 --peers=...`. This is where the integration bugs the unit tests miss show up.
+
+## Optional extensions (if we want to go deeper)
+
+**Task 10 — Persistence.** Dump `term`, `votedFor`, `log[]` to disk before responding to RPCs. Conceptually trivial; the value is internalizing *why* (e.g., votedFor across crashes prevents split votes). Skippable if read in the paper instead.
+
+**Task 11 — Snapshots + log compaction.** Separate sub-protocol (`InstallSnapshot` RPC), discard log prefixes, ship full state to lagging followers. Self-contained module; significant code.
+
+**Task 12 — Membership changes (joint consensus).** Genuinely subtle — the only part of the paper with known issues. High learning value, often skipped in pedagogical implementations.
+
+## Default plan
+
+Dive deep on 6–9. Read 10 conceptually. Skip 11–12 unless interest pulls us back. Reaching the end of Task 9 means we could read the etcd `raft` package and follow it.
+
+It's OK to deviate from this plan as understanding grows.
