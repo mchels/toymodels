@@ -189,6 +189,7 @@ func requestVotes(node_name string, node_term uint64, node_peers []Peer) []reque
 					term:        node_term,
 					voteGranted: false,
 				}
+				return
 			}
 			if resp != nil {
 				voteResults <- requestVoteResult{
