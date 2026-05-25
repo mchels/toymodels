@@ -4,6 +4,7 @@ option go_package = "./proto";
 
 service Raft {
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
 }
 
 message RequestVoteRequest {
@@ -14,4 +15,14 @@ message RequestVoteRequest {
 message RequestVoteResponse {
   uint64 term = 1;
   bool vote_granted = 2;
+}
+
+message AppendEntriesRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool success = 2;
 }

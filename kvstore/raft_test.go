@@ -121,16 +121,21 @@ func TestConcurrentAccess(t *testing.T) {
 type mockPeer struct {
 	voteGranted bool
 	term        uint64
+	appendCalls atomic.Int64
 	mu          sync.Mutex
 }
 
 func (m *mockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return &proto.RequestVoteResponse{
-		Term:        m.term,
-		VoteGranted: m.voteGranted,
-	}, nil
+	return &proto.RequestVoteResponse{Term: m.term, VoteGranted: m.voteGranted}, nil
+}
+
+func (m *mockPeer) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
+	m.appendCalls.Add(1)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return &proto.AppendEntriesResponse{Term: m.term, Success: true}, nil
 }
 
 // Slow peer for testing concurrency. Tracks the maximum number of concurrent
