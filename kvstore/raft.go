@@ -205,6 +205,9 @@ func requestVotes(node_name string, node_term uint64, node_peers []Peer) []reque
 	}()
 	nPeers := len(node_peers)
 	results := make([]requestVoteResult, 0, nPeers)
+	// TODO: Collecting all nPeer responses stalls for 5 seconds (from context.WithTimeout above)
+	// if any peer doesn't respond. Consider aborting early once it's clear that we have or cannot
+	// get a majority.
 	for i := 0; i < nPeers; i++ {
 		results = append(results, <-voteResults)
 	}
