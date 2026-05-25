@@ -446,3 +446,39 @@ func TestLeader_SendsHeartbeats(t *testing.T) {
 			p1.appendCalls.Load(), p2.appendCalls.Load())
 	}
 }
+
+func TestLeader_StepsDown_OnHigherTermAppendResponse(t *testing.T) {
+	node := NewRaftNode("node1", 100*time.Millisecond, 25*time.Millisecond)
+	// Peers grant votes at term 1, then start replying with a higher term.
+	p1 := &mockPeer{voteGranted: true, term: 1}
+	p2 := &mockPeer{voteGranted: true, term: 1}
+	node.SetPeers([]Peer{p1, p2})
+	node.Start()
+	defer node.Stop()
+
+	for node.State() != Leader {
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Bump peer term to force step-down on next heartbeat response.
+	p1.mu.Lock()
+	p1.term = 99
+	p1.mu.Unlock()
+	p2.mu.Lock()
+	p2.term = 99
+	p2.mu.Unlock()
+
+	deadline := time.After(500 * time.Millisecond)
+	for node.State() == Leader {
+		select {
+		case <-deadline:
+			t.Fatal("Leader did not step down on higher-term response")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if node.State() != Follower {
+		t.Errorf("expected Follower after step-down, got %v", node.State())
+	}
+	if node.CurrentTerm() != 99 {
+		t.Errorf("expected term 99 after step-down, got %d", node.CurrentTerm())
+	}
+}

@@ -226,31 +226,75 @@ func requestVotes(candidateId string, nodeTerm uint64, nodePeers []Peer) []reque
 }
 
 func (node *node) runLeader(ctx context.Context) {
-	heartbeatTicker := time.NewTicker(time.Duration(10) * time.Millisecond)
+	heartbeatTicker := time.NewTicker(node.heartbeatInterval)
 	select {
 	case <-heartbeatTicker.C:
-		ctxInner, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		node.mu.Lock()
-		for _, peer := range node.peers {
-			go func(p Peer) {
-				req := &proto.AppendEntriesRequest{
-					Term:     node.term,
-					LeaderId: node.name,
-				}
-				resp, err := peer.AppendEntries(ctxInner, req)
-				if err != nil {
-					log.Println("error when receiving heartbeat:", err)
-					// TODO: Return something?
-				}
-				if resp != nil {
-					// TODO: Return resp?
-				}
-
-			}(peer)
-		}
+		nodeName := node.name
+		nodeTerm := node.term
+		nodePeers := slices.Clone(node.peers)
 		node.mu.Unlock()
+		appendEntriesResults := sendHeartbeats(nodeName, nodeTerm, nodePeers)
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		for _, result := range appendEntriesResults {
+			// Check that we didn't change term and state since we unlocked above to send
+			// heartbeats.
+			if result.term > node.term && node.state == Leader && node.term == nodeTerm {
+				node.state = Follower
+				node.term = result.term
+				return
+			}
+		}
+	case <-ctx.Done():
+		heartbeatTicker.Stop()
 	}
+}
+
+func sendHeartbeats(nodeName string, nodeTerm uint64, nodePeers []Peer) []appendEntriesResult {
+	var wg sync.WaitGroup
+	appendEntriesChan := make(chan appendEntriesResult)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, peer := range nodePeers {
+		req := &proto.AppendEntriesRequest{
+			Term:     nodeTerm,
+			LeaderId: nodeName,
+		}
+		wg.Add(1)
+		go func(p Peer) {
+			defer wg.Done()
+			resp, err := peer.AppendEntries(ctx, req)
+			if err != nil {
+				log.Println("error when receiving heartbeat:", err)
+				// TODO: Return something?
+			}
+			if resp != nil {
+				appendEntriesChan <- appendEntriesResult{
+					term:    resp.Term,
+					success: resp.Success,
+				}
+			}
+		}(peer)
+	}
+	go func() {
+		wg.Wait()
+		close(appendEntriesChan)
+	}()
+	nPeers := len(nodePeers)
+	results := make([]appendEntriesResult, 0, nPeers)
+	// TODO: Collecting all nPeer responses stalls for 5 seconds (from context.WithTimeout above)
+	// if any peer doesn't respond. Consider aborting early once it's clear that we have or cannot
+	// get a majority.
+	for i := 0; i < nPeers; i++ {
+		results = append(results, <-appendEntriesChan)
+	}
+	return results
+}
+
+type appendEntriesResult struct {
+	term    uint64
+	success bool
 }
 
 func (node *node) Stop() {
