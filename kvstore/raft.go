@@ -130,9 +130,11 @@ func (node *node) runCandidate(ctx context.Context) {
 	nVotes := 1 // Start out by voting for self.
 	nVotesRequired := (len(node.peers)+1)/2 + 1
 	maxTermObserved := node.term
+	nodeName := node.name
 	electionTerm := node.term
+	nodePeers := slices.Clone(node.peers)
 	node.mu.Unlock()
-	voteResults := requestVotes(node.name, node.term, slices.Clone(node.peers))
+	voteResults := requestVotes(nodeName, electionTerm, nodePeers)
 
 	for _, result := range voteResults {
 		if result.voteGranted {
@@ -144,37 +146,38 @@ func (node *node) runCandidate(ctx context.Context) {
 	}
 
 	node.mu.Lock()
-	defer node.mu.Unlock()
 	if maxTermObserved > node.term {
 		// Abort election since a peer was found that has a higher term than this node.
 		node.becomeFollower(maxTermObserved)
+		node.mu.Unlock()
 		return
 	}
 
 	// Check that node wasn't bumped down to Follower with a RequestVote since we unlocked above.
 	if nVotes >= nVotesRequired && node.term == electionTerm && node.state == Candidate {
 		node.state = Leader
+		node.mu.Unlock()
+		return
 	}
+	node.mu.Unlock()
 
 	// No one gained majority so `node` is still Candidate. Wait for a bit until having a new
 	// election.
 	select {
 	case <-time.After(drawRandomTimeout(node.electionTimeout)):
-		return
 	case <-ctx.Done():
-		return
 	}
 }
 
-func requestVotes(node_name string, node_term uint64, node_peers []Peer) []requestVoteResult {
+func requestVotes(candidateId string, nodeTerm uint64, nodePeers []Peer) []requestVoteResult {
 	var wg sync.WaitGroup
 	voteResults := make(chan requestVoteResult)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for _, peer := range node_peers {
+	for _, peer := range nodePeers {
 		req := &proto.RequestVoteRequest{
-			Term:        node_term,
-			CandidateId: node_name,
+			Term:        nodeTerm,
+			CandidateId: candidateId,
 		}
 		wg.Add(1)
 		go func(p Peer) {
@@ -186,7 +189,7 @@ func requestVotes(node_name string, node_term uint64, node_peers []Peer) []reque
 				// we do not halt here.
 				log.Println("error:", err)
 				voteResults <- requestVoteResult{
-					term:        node_term,
+					term:        nodeTerm,
 					voteGranted: false,
 				}
 				return
@@ -203,7 +206,7 @@ func requestVotes(node_name string, node_term uint64, node_peers []Peer) []reque
 		wg.Wait()
 		close(voteResults)
 	}()
-	nPeers := len(node_peers)
+	nPeers := len(nodePeers)
 	results := make([]requestVoteResult, 0, nPeers)
 	// TODO: Collecting all nPeer responses stalls for 5 seconds (from context.WithTimeout above)
 	// if any peer doesn't respond. Consider aborting early once it's clear that we have or cannot
