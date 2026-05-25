@@ -21,40 +21,48 @@ const (
 // Peer represents a remote Raft node that can be called for votes
 type Peer interface {
 	RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error)
+
+	AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error)
 }
 
 type node struct {
-	name            string
-	state           NodeState
-	term            uint64
-	votedFor        string
-	electionTimeout time.Duration
-	heartbeatChan   chan uint64
-	cancel          context.CancelFunc
-	peers           []Peer
-	mu              sync.Mutex
+	name              string
+	state             NodeState
+	term              uint64
+	votedFor          string
+	electionTimeout   time.Duration
+	heartbeatInterval time.Duration
+	heartbeatChan     chan uint64
+	cancel            context.CancelFunc
+	peers             []Peer
+	mu                sync.Mutex
 }
 
 const defaultElectionTimeout time.Duration = 300 * time.Millisecond
+const defaultHeartbeatInterval time.Duration = defaultElectionTimeout / 5
 
 func drawRandomTimeout(baseTimeout time.Duration) time.Duration {
 	return time.Duration(float64(baseTimeout) * (1 + rand.Float64()))
 }
 
-func NewRaftNode(name string, electionTimeout time.Duration) *node {
+func NewRaftNode(name string, electionTimeout time.Duration, heartbeatInterval time.Duration) *node {
 	if name == "" {
 		panic("Node name must not be empty")
 	}
 	if electionTimeout == 0 {
 		electionTimeout = defaultElectionTimeout
 	}
+	if heartbeatInterval == 0 {
+		heartbeatInterval = defaultHeartbeatInterval
+	}
 	return &node{
-		name:            name,
-		state:           Follower,
-		term:            0,
-		electionTimeout: electionTimeout,
-		heartbeatChan:   make(chan uint64),
-		peers:           []Peer{},
+		name:              name,
+		state:             Follower,
+		term:              0,
+		electionTimeout:   electionTimeout,
+		heartbeatInterval: heartbeatInterval,
+		heartbeatChan:     make(chan uint64),
+		peers:             []Peer{},
 	}
 }
 
@@ -218,8 +226,31 @@ func requestVotes(candidateId string, nodeTerm uint64, nodePeers []Peer) []reque
 }
 
 func (node *node) runLeader(ctx context.Context) {
-	// Broadcast heartbeats
-	// Generally, later: AppendEntries
+	heartbeatTicker := time.NewTicker(time.Duration(10) * time.Millisecond)
+	select {
+	case <-heartbeatTicker.C:
+		ctxInner, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		node.mu.Lock()
+		for _, peer := range node.peers {
+			go func(p Peer) {
+				req := &proto.AppendEntriesRequest{
+					Term:     node.term,
+					LeaderId: node.name,
+				}
+				resp, err := peer.AppendEntries(ctxInner, req)
+				if err != nil {
+					log.Println("error when receiving heartbeat:", err)
+					// TODO: Return something?
+				}
+				if resp != nil {
+					// TODO: Return resp?
+				}
+
+			}(peer)
+		}
+		node.mu.Unlock()
+	}
 }
 
 func (node *node) Stop() {
