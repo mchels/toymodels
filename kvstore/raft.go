@@ -5,6 +5,7 @@ import (
 	"kvstore/proto"
 	"log"
 	"math/rand"
+	"slices"
 	"sync"
 	"time"
 )
@@ -127,48 +128,13 @@ func (node *node) runCandidate(ctx context.Context) {
 		return
 	}
 	nVotes := 1 // Start out by voting for self.
-	maxTermObserved := node.term
-	var wg sync.WaitGroup
-	voteResults := make(chan requestVoteResult)
 	nVotesRequired := (len(node.peers)+1)/2 + 1
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for _, peer := range node.peers {
-		req := &proto.RequestVoteRequest{
-			Term:        node.term,
-			CandidateId: node.name,
-		}
-		wg.Add(1)
-		go func(p Peer) {
-			defer wg.Done()
-			resp, err := p.RequestVote(ctx, req)
-			if err != nil {
-				// We only halt execution on errors we do not understand. Errors from RequestVote
-				// might be due to transient effect, e.g., network etc. which we do understand so
-				// we do not halt here.
-				log.Println("error:", err)
-				voteResults <- requestVoteResult{
-					term:        node.term,
-					voteGranted: false,
-				}
-			}
-			if resp != nil {
-				voteResults <- requestVoteResult{
-					term:        resp.Term,
-					voteGranted: resp.VoteGranted,
-				}
-			}
-		}(peer)
-	}
+	maxTermObserved := node.term
 	electionTerm := node.term
 	node.mu.Unlock()
+	voteResults := requestVotes(node.name, node.term, slices.Clone(node.peers))
 
-	go func() {
-		wg.Wait()
-		close(voteResults)
-	}()
-
-	for result := range voteResults {
+	for _, result := range voteResults {
 		if result.voteGranted {
 			nVotes++
 		}
@@ -198,6 +164,50 @@ func (node *node) runCandidate(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	}
+}
+
+func requestVotes(node_name string, node_term uint64, node_peers []Peer) []requestVoteResult {
+	var wg sync.WaitGroup
+	voteResults := make(chan requestVoteResult)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, peer := range node_peers {
+		req := &proto.RequestVoteRequest{
+			Term:        node_term,
+			CandidateId: node_name,
+		}
+		wg.Add(1)
+		go func(p Peer) {
+			defer wg.Done()
+			resp, err := p.RequestVote(ctx, req)
+			if err != nil {
+				// We only halt execution on errors we do not understand. Errors from RequestVote
+				// might be due to transient effect, e.g., network etc. which we do understand so
+				// we do not halt here.
+				log.Println("error:", err)
+				voteResults <- requestVoteResult{
+					term:        node_term,
+					voteGranted: false,
+				}
+			}
+			if resp != nil {
+				voteResults <- requestVoteResult{
+					term:        resp.Term,
+					voteGranted: resp.VoteGranted,
+				}
+			}
+		}(peer)
+	}
+	go func() {
+		wg.Wait()
+		close(voteResults)
+	}()
+	nPeers := len(node_peers)
+	results := make([]requestVoteResult, 0, nPeers)
+	for i := 0; i < nPeers; i++ {
+		results = append(results, <-voteResults)
+	}
+	return results
 }
 
 func (node *node) runLeader(ctx context.Context) {
