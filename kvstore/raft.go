@@ -226,10 +226,8 @@ func requestVotes(candidateId string, nodeTerm uint64, nodePeers []Peer) []reque
 }
 
 func (node *node) runLeader(ctx context.Context) {
-	heartbeatTicker := time.NewTicker(node.heartbeatInterval)
-	defer heartbeatTicker.Stop()
 	select {
-	case <-heartbeatTicker.C:
+	case <-time.After(node.heartbeatInterval):
 		node.mu.Lock()
 		nodeName := node.name
 		nodeTerm := node.term
@@ -237,15 +235,18 @@ func (node *node) runLeader(ctx context.Context) {
 		node.mu.Unlock()
 		appendEntriesResults := sendHeartbeats(nodeName, nodeTerm, nodePeers)
 		node.mu.Lock()
+		maxTerm := node.term
 		for _, result := range appendEntriesResults {
-			// Check that we didn't change term and state since we unlocked above to send
-			// heartbeats.
-			if result.term > node.term && node.state == Leader && node.term == nodeTerm {
-				node.state = Follower
-				node.term = result.term
-				node.mu.Unlock()
-				return
+			if result.term > maxTerm {
+				maxTerm = result.term
 			}
+		}
+		// Check that we didn't change term and state since we unlocked above to send heartbeats.
+		if maxTerm > node.term && node.state == Leader && node.term == nodeTerm {
+			node.state = Follower
+			node.term = maxTerm
+			node.mu.Unlock()
+			return
 		}
 		node.mu.Unlock()
 	case <-ctx.Done():
@@ -358,6 +359,8 @@ func (node *node) HandleAppendEntries(req *proto.AppendEntriesRequest) *proto.Ap
 	} else if req.Term == currentTerm && node.state == Leader {
 		panic("Received heartbeat at same term while leader. This should never happen.")
 	}
+	// Reset currentTerm since becomeFollower may have changed term.
+	currentTerm = node.term
 	node.mu.Unlock()
 	node.ReceiveHeartbeat(currentTerm)
 	return &proto.AppendEntriesResponse{
