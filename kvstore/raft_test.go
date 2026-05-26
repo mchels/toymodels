@@ -482,3 +482,63 @@ func TestLeader_StepsDown_OnHigherTermAppendResponse(t *testing.T) {
 		t.Errorf("expected term 99 after step-down, got %d", node.CurrentTerm())
 	}
 }
+
+func TestFollower_ResetsTimer_OnAppendEntries(t *testing.T) {
+	node := NewRaftNode("node1", 100*time.Millisecond, 25*time.Millisecond)
+	node.SetPeers([]Peer{&mockPeer{}, &mockPeer{}})
+	node.Start()
+	defer node.Stop()
+
+	// Heartbeat faster than election timeout for 300ms total.
+	for i := 0; i < 6; i++ {
+		time.Sleep(50 * time.Millisecond)
+		node.HandleAppendEntries(&proto.AppendEntriesRequest{Term: 1, LeaderId: "leader"})
+	}
+	if node.State() != Follower {
+		t.Errorf("AppendEntries should keep Follower, got %v", node.State())
+	}
+	if node.CurrentTerm() != 1 {
+		t.Errorf("expected term 1 after AppendEntries, got %d", node.CurrentTerm())
+	}
+}
+
+func TestCandidate_StepsDown_OnAppendEntries(t *testing.T) {
+	node := NewRaftNode("node1", 50*time.Millisecond, 25*time.Millisecond)
+	// Peers deny votes so node stays Candidate.
+	node.SetPeers([]Peer{
+		&mockPeer{voteGranted: false, term: 0},
+		&mockPeer{voteGranted: false, term: 0},
+	})
+	node.Start()
+	defer node.Stop()
+
+	for node.State() != Candidate {
+		time.Sleep(5 * time.Millisecond)
+	}
+	candidateTerm := node.CurrentTerm()
+
+	// A leader at the same term sends AppendEntries.
+	resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{
+		Term: candidateTerm, LeaderId: "leader",
+	})
+	if !resp.Success {
+		t.Errorf("AppendEntries at same term should be accepted by Candidate")
+	}
+	// Give runCandidate a moment to observe the state change.
+	time.Sleep(20 * time.Millisecond)
+	if node.State() != Follower {
+		t.Errorf("Candidate should step down on AppendEntries, got %v", node.State())
+	}
+}
+
+func TestHandleAppendEntries_RejectsLowerTerm(t *testing.T) {
+	node := NewRaftNode("node1", 250*time.Millisecond, 50*time.Millisecond)
+	node.HandleRequestVote(&proto.RequestVoteRequest{Term: 5, CandidateId: "x"})
+	resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{Term: 4, LeaderId: "stale"})
+	if resp.Success {
+		t.Error("AppendEntries from lower term must be rejected")
+	}
+	if resp.Term != 5 {
+		t.Errorf("response should carry currentTerm=5, got %d", resp.Term)
+	}
+}

@@ -343,6 +343,27 @@ func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.Reques
 	}
 }
 
+func (node *node) HandleAppendEntries(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse {
+	node.mu.Lock()
+	currentTerm := node.term
+	if req.Term < currentTerm {
+		return &proto.AppendEntriesResponse{
+			Term:    currentTerm,
+			Success: false,
+		}
+	} else if (req.Term > currentTerm) || (req.Term == currentTerm && node.state == Candidate) {
+		node.becomeFollower(req.Term)
+	} else if req.Term == currentTerm && node.state == Leader {
+		panic("Received heartbeat at same term while leader. This should never happen.")
+	}
+	node.mu.Unlock()
+	node.ReceiveHeartbeat(currentTerm)
+	return &proto.AppendEntriesResponse{
+		Term:    currentTerm,
+		Success: true,
+	}
+}
+
 // Caller must do node.mu.Lock()
 func (node *node) becomeFollower(term uint64) {
 	node.term = term
