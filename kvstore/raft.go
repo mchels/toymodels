@@ -227,6 +227,7 @@ func requestVotes(candidateId string, nodeTerm uint64, nodePeers []Peer) []reque
 
 func (node *node) runLeader(ctx context.Context) {
 	heartbeatTicker := time.NewTicker(node.heartbeatInterval)
+	defer heartbeatTicker.Stop()
 	select {
 	case <-heartbeatTicker.C:
 		node.mu.Lock()
@@ -236,18 +237,18 @@ func (node *node) runLeader(ctx context.Context) {
 		node.mu.Unlock()
 		appendEntriesResults := sendHeartbeats(nodeName, nodeTerm, nodePeers)
 		node.mu.Lock()
-		defer node.mu.Unlock()
 		for _, result := range appendEntriesResults {
 			// Check that we didn't change term and state since we unlocked above to send
 			// heartbeats.
 			if result.term > node.term && node.state == Leader && node.term == nodeTerm {
 				node.state = Follower
 				node.term = result.term
+				node.mu.Unlock()
 				return
 			}
 		}
+		node.mu.Unlock()
 	case <-ctx.Done():
-		heartbeatTicker.Stop()
 	}
 }
 
@@ -264,7 +265,7 @@ func sendHeartbeats(nodeName string, nodeTerm uint64, nodePeers []Peer) []append
 		wg.Add(1)
 		go func(p Peer) {
 			defer wg.Done()
-			resp, err := peer.AppendEntries(ctx, req)
+			resp, err := p.AppendEntries(ctx, req)
 			if err != nil {
 				log.Println("error when receiving heartbeat:", err)
 				// TODO: Return something?
@@ -347,6 +348,7 @@ func (node *node) HandleAppendEntries(req *proto.AppendEntriesRequest) *proto.Ap
 	node.mu.Lock()
 	currentTerm := node.term
 	if req.Term < currentTerm {
+		node.mu.Unlock()
 		return &proto.AppendEntriesResponse{
 			Term:    currentTerm,
 			Success: false,
