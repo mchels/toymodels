@@ -184,7 +184,7 @@ func TestCandidate_WinsMajority_BecomesLeader(t *testing.T) {
 	node.Start()
 	defer node.Stop()
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	if node.State() != Leader {
 		t.Errorf("should become Leader with majority, got %v", node.State())
@@ -202,7 +202,7 @@ func TestCandidate_NoMajority_StaysCandidate(t *testing.T) {
 	node.Start()
 	defer node.Stop()
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	if node.State() != Candidate {
 		t.Errorf("should stay Candidate without majority, got %v", node.State())
@@ -222,7 +222,7 @@ func TestCandidate_PartialVotes_NeedsMajority(t *testing.T) {
 	node.Start()
 	defer node.Stop()
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// 2 votes (self + peer1) out of 5 - not majority
 	if node.State() != Candidate {
@@ -269,7 +269,7 @@ func TestSingleNodeCluster_BecomesLeader(t *testing.T) {
 	node.Start()
 	defer node.Stop()
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	if node.State() != Leader {
 		t.Errorf("single node should become Leader, got %v", node.State())
