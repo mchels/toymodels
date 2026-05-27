@@ -1025,13 +1025,334 @@ Yes — ask if stuck on the role-loop teardown (how `runX` returns cleanly), the
 
 ---
 
-# Tentative Plan: Tasks 7+
+# Task 7: Log Replication
+
+Concept
+
+Heartbeats give a leader authority; log replication is what the leader does *with* that authority. AppendEntries now carries actual entries with index + term + command, and a `prevLogIndex`/`prevLogTerm` consistency probe that enforces Raft's **log matching property**: if two logs share an entry at the same (index, term), they agree on every prior entry. The leader uses per-peer `nextIndex` to find each follower's matching point, and a `commitIndex` that only advances once an entry from the current term is replicated on a majority. RequestVote also gains the **election restriction**: a voter denies any candidate whose log is staler than its own.
+
+Applying committed entries to `store.go` is **Task 8**. Task 7 stops at "entry is committed on every node"; nothing executes the command yet.
+
+Background
+
+The log is an array of entries indexed from 1. Each entry carries `(term, index, command)`. The leader's invariants:
+
+- Append-only on the leader at the current term.
+- For each peer, hold a `nextIndex` (next slot to send) and `matchIndex` (highest known-replicated slot). Initialize `nextIndex = len(leaderLog)+1`, `matchIndex = 0` on becoming leader.
+- AppendEntries to peer p sends `entries = leaderLog[nextIndex[p]..]`, with `prevLogIndex = nextIndex[p]-1` and `prevLogTerm = leaderLog[prevLogIndex].term`.
+- If follower rejects (prevLog mismatch), decrement `nextIndex[p]` and retry. If follower accepts, advance `matchIndex[p]` and `nextIndex[p]`.
+- Leader commits index N once `N > commitIndex`, a majority of `matchIndex[*] >= N`, AND `leaderLog[N].term == currentTerm`. The current-term clause is **Figure 8** in the paper — committing only same-term entries indirectly commits earlier ones and prevents a famous safety bug.
+
+The follower's `HandleAppendEntries` rules (extended from Task 6):
+
+1. Reject if `req.Term < currentTerm`.
+2. If `req.PrevLogIndex > 0` and follower's log doesn't contain a matching entry at that index/term: reject (still reset election timer; the leader is legitimate, just probing).
+3. Append `req.Entries`, **truncating** any existing tail that conflicts in term at the same index. Identical entries are a no-op (idempotent).
+4. If `req.LeaderCommit > commitIndex`: set `commitIndex = min(req.LeaderCommit, lastIndexInLog)`.
+
+Election restriction in `HandleRequestVote`:
+
+- Define "up-to-date": `(lastLogTerm_a, lastLogIndex_a) >= (lastLogTerm_b, lastLogIndex_b)` in lex order.
+- Deny the vote if the candidate's `(LastLogTerm, LastLogIndex)` is **less** than the voter's, even when term/votedFor checks would otherwise grant.
+
+Requirements
+
+1. **Log structure.** Add `log []LogEntry` to `node`, where `LogEntry = { Term uint64; Index uint64; Command []byte }`. Index 1-based. A sentinel at index 0 (term 0) keeps `prevLogIndex==0` cases simple — pick that or handle index 0 explicitly, but be consistent.
+2. **`Propose(cmd []byte) (index uint64, ok bool)`.** Public method. If state != Leader, return `(0, false)`. Otherwise append `{currentTerm, len+1, cmd}` to `node.log` and return `(index, true)`. Replication is driven by `runLeader`; `Propose` does not block waiting for commit (Task 8 will).
+3. **Per-peer leader state.** On `becomeLeader()`: reset `nextIndex[p] = len(node.log)+1` and `matchIndex[p] = 0` for every peer. Stored on the node; cleared on step-down.
+4. **Replication path.** `runLeader`'s heartbeat tick fans out AppendEntries with the entries owed to each peer (possibly empty — heartbeats remain a special case). The fan-out is concurrent across peers (existing pattern).
+5. **Reject → backoff.** On a `Success: false` response with `resp.Term <= currentTerm`, decrement `nextIndex[p]` (floor at 1) and retry on the next tick. On `resp.Term > currentTerm`, step down (Task 6 behavior).
+6. **Match → advance.** On `Success: true`, set `nextIndex[p] = prevLogIndex + len(entries) + 1` and `matchIndex[p] = nextIndex[p] - 1`. Compute new commitIndex per the rule above and update `node.commitIndex`.
+7. **Follower acceptance.** `HandleAppendEntries` implements the four rules above. It must be idempotent: replaying the same request leaves the log identical.
+8. **Election restriction.** `HandleRequestVote` denies stale candidates. Extend `RequestVoteRequest` with `LastLogIndex`, `LastLogTerm`; the candidate populates these from its own log when it issues votes.
+9. **Concurrency.** All log/index reads and writes go through `node.mu`. Tests run with `-race`.
+
+Proto changes
+
+Update `proto/raft.proto`:
+
+```protobuf
+message LogEntry {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes  command = 3;
+}
+
+message RequestVoteRequest {
+  uint64 term = 1;
+  string candidate_id = 2;
+  uint64 last_log_index = 3;
+  uint64 last_log_term  = 4;
+}
+
+message AppendEntriesRequest {
+  uint64 term = 1;
+  string leader_id = 2;
+  uint64 prev_log_index = 3;
+  uint64 prev_log_term  = 4;
+  repeated LogEntry entries = 5;
+  uint64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+  uint64 term = 1;
+  bool   success = 2;
+}
+```
+
+Regenerate with `protoc --go_out=. --go-grpc_out=. proto/raft.proto`.
+
+Test file: kvstore/raft_test.go
+
+`mockPeer` needs to capture AppendEntries arguments (we'll assert on `entries` and `prevLogIndex`) and let tests script the response. A scriptable peer that returns `Success` from a queue or a callback works:
+
+```go
+type recordingPeer struct {
+    mu          sync.Mutex
+    term        uint64
+    voteGranted bool
+    // Reply policy: if respond returns nil, fall back to {term, success: true}.
+    respond     func(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse
+    // History.
+    appendCalls []*proto.AppendEntriesRequest
+}
+
+func (m *recordingPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+    m.mu.Lock(); defer m.mu.Unlock()
+    return &proto.RequestVoteResponse{Term: m.term, VoteGranted: m.voteGranted}, nil
+}
+
+func (m *recordingPeer) AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
+    m.mu.Lock(); defer m.mu.Unlock()
+    m.appendCalls = append(m.appendCalls, req)
+    if m.respond != nil {
+        if r := m.respond(req); r != nil { return r, nil }
+    }
+    return &proto.AppendEntriesResponse{Term: m.term, Success: true}, nil
+}
+```
+
+Make these tests pass:
+
+```go
+func TestPropose_NonLeader_Rejected(t *testing.T) {
+    node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+    if _, ok := node.Propose([]byte("x")); ok {
+        t.Error("Follower must not accept Propose")
+    }
+}
+
+func TestPropose_Leader_AppendsToLog(t *testing.T) {
+    node := newLeaderForTest(t) // helper: spins up a node with mock peers granting votes,
+                                // waits until State() == Leader, returns it.
+    idx, ok := node.Propose([]byte("set x=1"))
+    if !ok || idx != 1 {
+        t.Fatalf("Propose returned (%d,%v), want (1,true)", idx, ok)
+    }
+    if got := node.LogLen(); got != 1 {
+        t.Errorf("leader log len = %d, want 1", got)
+    }
+}
+
+func TestLeader_ReplicatesEntries_ToPeers(t *testing.T) {
+    p1 := &recordingPeer{voteGranted: true, term: 1}
+    p2 := &recordingPeer{voteGranted: true, term: 1}
+    node := newLeaderForTestWithPeers(t, p1, p2)
+
+    node.Propose([]byte("a"))
+    node.Propose([]byte("b"))
+
+    // Within a few heartbeat intervals, each peer should see entries [a,b] in some call.
+    waitFor(t, 500*time.Millisecond, func() bool {
+        return peerSawEntries(p1, "a", "b") && peerSawEntries(p2, "a", "b")
+    })
+}
+
+func TestFollower_AcceptsAppend_WithMatchingPrev(t *testing.T) {
+    node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+    // Put the follower in a state where its log already has one entry at term 1.
+    seedLog(node, []proto.LogEntry{{Term: 1, Index: 1, Command: []byte("a")}})
+    setTerm(node, 1)
+
+    resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{
+        Term: 1, LeaderId: "L",
+        PrevLogIndex: 1, PrevLogTerm: 1,
+        Entries: []*proto.LogEntry{{Term: 1, Index: 2, Command: []byte("b")}},
+    })
+    if !resp.Success {
+        t.Fatal("expected Success on matching prev")
+    }
+    if node.LogLen() != 2 {
+        t.Errorf("log len = %d, want 2", node.LogLen())
+    }
+}
+
+func TestFollower_RejectsAppend_WhenPrevMissing(t *testing.T) {
+    node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+    setTerm(node, 1)
+    resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{
+        Term: 1, LeaderId: "L",
+        PrevLogIndex: 5, PrevLogTerm: 1, // follower has no entry at index 5
+        Entries: []*proto.LogEntry{{Term: 1, Index: 6, Command: []byte("x")}},
+    })
+    if resp.Success {
+        t.Error("must reject when PrevLogIndex is missing in follower log")
+    }
+}
+
+func TestFollower_TruncatesConflictingTail(t *testing.T) {
+    node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+    seedLog(node, []proto.LogEntry{
+        {Term: 1, Index: 1, Command: []byte("a")},
+        {Term: 1, Index: 2, Command: []byte("b")},
+        {Term: 2, Index: 3, Command: []byte("stale")}, // wrong-term tail
+    })
+    setTerm(node, 3)
+    resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{
+        Term: 3, LeaderId: "L",
+        PrevLogIndex: 2, PrevLogTerm: 1,
+        Entries: []*proto.LogEntry{{Term: 3, Index: 3, Command: []byte("good")}},
+    })
+    if !resp.Success {
+        t.Fatal("expected Success on matching prev=2")
+    }
+    if cmd := node.EntryAt(3); string(cmd) != "good" {
+        t.Errorf("index 3 = %q, want %q (truncate-and-replace)", cmd, "good")
+    }
+    if node.LogLen() != 3 {
+        t.Errorf("log len = %d, want 3 (no spurious extension)", node.LogLen())
+    }
+}
+
+func TestFollower_AdvancesCommit_FromLeaderCommit(t *testing.T) {
+    node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+    seedLog(node, []proto.LogEntry{
+        {Term: 1, Index: 1, Command: []byte("a")},
+        {Term: 1, Index: 2, Command: []byte("b")},
+    })
+    setTerm(node, 1)
+    node.HandleAppendEntries(&proto.AppendEntriesRequest{
+        Term: 1, LeaderId: "L",
+        PrevLogIndex: 2, PrevLogTerm: 1,
+        Entries: nil,
+        LeaderCommit: 5, // larger than log length on purpose
+    })
+    if got := node.CommitIndex(); got != 2 {
+        t.Errorf("commitIndex = %d, want 2 (clamped to log length)", got)
+    }
+}
+
+func TestLeader_CommitsAfterMajorityReplication(t *testing.T) {
+    p1 := &recordingPeer{voteGranted: true, term: 1}
+    p2 := &recordingPeer{voteGranted: true, term: 1}
+    node := newLeaderForTestWithPeers(t, p1, p2)
+
+    // p1 acks normally; p2 keeps rejecting (simulate slow follower).
+    p2.mu.Lock()
+    p2.respond = func(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse {
+        return &proto.AppendEntriesResponse{Term: req.Term, Success: false}
+    }
+    p2.mu.Unlock()
+
+    node.Propose([]byte("only-needs-one-other"))
+    waitFor(t, 500*time.Millisecond, func() bool { return node.CommitIndex() == 1 })
+    if node.CommitIndex() != 1 {
+        t.Errorf("commitIndex = %d, want 1 (self + p1 = majority)", node.CommitIndex())
+    }
+}
+
+func TestLeader_DecrementsNextIndex_OnReject(t *testing.T) {
+    p1 := &recordingPeer{voteGranted: true, term: 1}
+    // Reject every AppendEntries with PrevLogIndex >= 2; succeed at 1.
+    p1.respond = func(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse {
+        if req.PrevLogIndex >= 2 {
+            return &proto.AppendEntriesResponse{Term: req.Term, Success: false}
+        }
+        return nil // fall through to default {Success: true}
+    }
+    p2 := &recordingPeer{voteGranted: true, term: 1}
+    node := newLeaderForTestWithPeers(t, p1, p2)
+
+    node.Propose([]byte("a"))
+    node.Propose([]byte("b"))
+    node.Propose([]byte("c"))
+
+    // Eventually p1 should receive a call with PrevLogIndex == 1 (i.e., leader walked back).
+    waitFor(t, 500*time.Millisecond, func() bool {
+        p1.mu.Lock(); defer p1.mu.Unlock()
+        for _, r := range p1.appendCalls {
+            if r.PrevLogIndex == 1 { return true }
+        }
+        return false
+    })
+}
+
+func TestRequestVote_DeniesStaleCandidate(t *testing.T) {
+    node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+    seedLog(node, []proto.LogEntry{
+        {Term: 2, Index: 1, Command: []byte("a")},
+        {Term: 2, Index: 2, Command: []byte("b")},
+    })
+    setTerm(node, 2)
+    // Candidate has higher term but its log ends at term 1, index 1 — strictly stale.
+    resp := node.HandleRequestVote(&proto.RequestVoteRequest{
+        Term: 3, CandidateId: "stale",
+        LastLogIndex: 1, LastLogTerm: 1,
+    })
+    if resp.VoteGranted {
+        t.Error("must deny vote: candidate log is staler than voter's")
+    }
+}
+```
+
+Pick test helpers (`newLeaderForTest`, `seedLog`, `setTerm`, `waitFor`, `LogLen`, `EntryAt`, `CommitIndex`, `peerSawEntries`) that fit the existing style. Helpers that touch internal fields can live in `raft_test.go` (same package) and grab `node.mu` directly.
+
+Go Concepts to Cover
+
+- Slice ownership and mutation: appending to / truncating `node.log` while another goroutine may iterate it requires either copying under the lock before sending, or holding the lock across the snapshot — the existing `slices.Clone(node.peers)` pattern is the template.
+- `map[Peer]uint64` (or per-peer struct keyed by index) for `nextIndex` / `matchIndex`. Initialize on `becomeLeader()`, drop on step-down.
+- `sort.Slice` over `matchIndex` values is a tidy way to compute the majority `N` (Figure 8 commit rule).
+- 1-based indexing in Go's 0-based slices is a recurring source of off-by-ones; pick one convention (sentinel at index 0 is simplest) and document it.
+- Variadic gRPC slices: `repeated LogEntry` becomes `[]*proto.LogEntry`. Watch for nil vs empty slice on the wire — both should mean "no new entries" in your handler.
+
+What to modify
+
+- `kvstore/proto/raft.proto`
+  - Add `LogEntry` and the new fields on `RequestVoteRequest` / `AppendEntriesRequest`. Regenerate.
+- `kvstore/raft.go`
+  - `LogEntry` Go struct (or alias `*proto.LogEntry`). Add `log`, `commitIndex` to `node`.
+  - `Propose(cmd []byte) (uint64, bool)`.
+  - `becomeLeader()` initializes `nextIndex` / `matchIndex` per peer.
+  - `runLeader`: replace heartbeat-only fan-out with one that picks `entries[nextIndex[p]:]`, `prevLogIndex`, `prevLogTerm` for each peer. Empty `entries` is still a valid heartbeat.
+  - On responses: handle three cases — higher term (step down), success (advance match/next, recompute commit), reject (decrement next). Keep the response-loop logic out of `sendHeartbeats`; it's no longer just heartbeats — rename to `replicate` or similar.
+  - `HandleAppendEntries`: extend with the four-rule body above. Truncation = `node.log = node.log[:prevLogIndex]; node.log = append(node.log, entries...)` (after verifying the prev match). Apply `LeaderCommit` clamp at the end.
+  - `HandleRequestVote`: add the up-to-date check before granting.
+  - When sending RequestVote in `runCandidate`, populate `LastLogIndex` / `LastLogTerm` from the log under the lock.
+- `kvstore/raft_test.go`
+  - New scriptable peer (or extend `mockPeer`).
+  - Helpers (`seedLog`, `setTerm`, `waitFor`, `newLeaderForTest...`).
+  - The tests above.
+
+Verification
+
+```
+cd /workspace/kvstore
+go test -race ./...
+```
+
+All Task 6 tests still pass (heartbeats are a degenerate case of replication: empty `entries`). Plus the ten Task 7 tests above. The KV store is **not** wired to the log yet — `Propose` returns once entries are committed in the log, but nothing applies them. That's Task 8.
+
+Hints available
+
+Yes — ask if stuck on the 1-based / 0-based indexing convention, the truncate-vs-extend distinction in rule 3, the Figure 8 commit rule, or the leader fan-out where each peer needs different `prevLogIndex` / `entries`.
+
+---
+
+# Tentative Plan: Tasks 8+
 
 This is a sketch of the remaining tasks to reach a complete pedagogical Raft toy model. Not binding — we can add, drop, reorder, or rescope as we learn what's interesting. Revisit before starting each task.
 
 ## Core (must-have for a "decent, complete" model)
-
-**Task 7 — Log replication.** The heart of Raft. AppendEntries carries actual entries; introduce log matching (`prevLogIndex`/`prevLogTerm` consistency check), per-peer `nextIndex`/`matchIndex`, follower truncation on conflict, leader commit index advancing once replicated to majority. Add the election restriction to RequestVote (candidate's log must be at least as up-to-date as voter's). Longest task — Raft is mostly this.
 
 **Task 8 — Apply committed entries to the KV store.** Wire the Raft log to `store.go`. Leader proposes entries from gRPC `Put`/`Delete` calls, blocks until committed, then replies. A dedicated `applyLoop` drains committed entries into the state machine. Non-leaders redirect or return a "not leader, try X" error to the client.
 
@@ -1047,7 +1368,7 @@ This is a sketch of the remaining tasks to reach a complete pedagogical Raft toy
 
 ## Default plan
 
-Dive deep on 6–9. Read 10 conceptually. Skip 11–12 unless interest pulls us back. Reaching the end of Task 9 means we could read the etcd `raft` package and follow it.
+Dive deep on 7–9. Read 10 conceptually. Skip 11–12 unless interest pulls us back. Reaching the end of Task 9 means we could read the etcd `raft` package and follow it.
 
 It's OK to deviate from this plan as understanding grows.
 
