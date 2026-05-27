@@ -383,3 +383,14 @@ func (node *node) becomeFollower(term uint64) {
 	node.votedFor = ""
 	node.state = Follower
 }
+
+func (node *node) Propose(cmd []byte) (index uint64, ok bool) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.state != Leader {
+		return 0, false
+	}
+	newIndex := uint64(len(node.log) + 1)
+	node.log = append(node.log, LogEntry{Term: node.term, Index: newIndex, Command: cmd})
+	return newIndex, true
+}
