@@ -25,6 +25,12 @@ type Peer interface {
 	AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error)
 }
 
+type LogEntry struct {
+	Term    uint64
+	Index   uint64
+	Command []byte
+}
+
 type node struct {
 	name              string
 	state             NodeState
@@ -33,6 +39,7 @@ type node struct {
 	electionTimeout   time.Duration
 	heartbeatInterval time.Duration
 	heartbeatChan     chan uint64
+	log               []LogEntry
 	cancel            context.CancelFunc
 	peers             []Peer
 	mu                sync.Mutex
@@ -63,6 +70,7 @@ func NewRaftNode(name string, electionTimeout time.Duration, heartbeatInterval t
 		heartbeatInterval: heartbeatInterval,
 		heartbeatChan:     make(chan uint64),
 		peers:             []Peer{},
+		log:               []LogEntry{LogEntry{0, 0, []byte{}}},
 	}
 }
 
