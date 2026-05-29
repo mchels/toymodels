@@ -70,7 +70,8 @@ func NewRaftNode(name string, electionTimeout time.Duration, heartbeatInterval t
 		heartbeatInterval: heartbeatInterval,
 		heartbeatChan:     make(chan uint64),
 		peers:             []Peer{},
-		log:               []LogEntry{LogEntry{0, 0, []byte{}}},
+		// Insert a sentinel logentry in index 0 to make log entries 1-based.
+		log: []LogEntry{LogEntry{0, 0, []byte{}}},
 	}
 }
 
@@ -90,6 +91,11 @@ func (node *node) SetPeers(peers []Peer) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	node.peers = peers
+}
+
+func (node *node) LogLen() int {
+	// Subtract 1 to account for sentinel log entry.
+	return len(node.log) - 1
 }
 
 func (node *node) Start() {
@@ -387,10 +393,15 @@ func (node *node) becomeFollower(term uint64) {
 func (node *node) Propose(cmd []byte) (index uint64, ok bool) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
+	return node.propose(cmd)
+}
+
+// Caller must do node.mu.Lock()
+func (node *node) propose(cmd []byte) (index uint64, ok bool) {
 	if node.state != Leader {
 		return 0, false
 	}
-	newIndex := uint64(len(node.log) + 1)
+	newIndex := uint64(node.LogLen() + 1)
 	node.log = append(node.log, LogEntry{Term: node.term, Index: newIndex, Command: cmd})
 	return newIndex, true
 }

@@ -575,24 +575,43 @@ func (m *recordingPeer) AppendEntries(ctx context.Context, req *proto.AppendEntr
 	return &proto.AppendEntriesResponse{Term: m.term, Success: true}, nil
 }
 
+func newLeaderForTest(t *testing.T) node {
+	node := NewRaftNode("node1", 50*time.Millisecond, 0)
+
+	// Two peers that will grant votes
+	peer1 := &mockPeer{voteGranted: true, term: 1}
+	peer2 := &mockPeer{voteGranted: true, term: 1}
+	node.SetPeers([]Peer{peer1, peer2}) // 3-node cluster
+	node.Start()
+	for {
+		if node.State() == Leader {
+			return *node
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestPropose_NonLeader_Rejected(t *testing.T) {
 	node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+	defer node.Stop()
 	if _, ok := node.Propose([]byte("x")); ok {
 		t.Error("Follower must not accept Propose")
 	}
 }
 
-// func TestPropose_Leader_AppendsToLog(t *testing.T) {
-// 	node := newLeaderForTest(t) // helper: spins up a node with mock peers granting votes,
-// 	// waits until State() == Leader, returns it.
-// 	idx, ok := node.Propose([]byte("set x=1"))
-// 	if !ok || idx != 1 {
-// 		t.Fatalf("Propose returned (%d,%v), want (1,true)", idx, ok)
-// 	}
-// 	if got := node.LogLen(); got != 1 {
-// 		t.Errorf("leader log len = %d, want 1", got)
-// 	}
-// }
+func TestPropose_Leader_AppendsToLog(t *testing.T) {
+	node := newLeaderForTest(t)
+	defer node.Stop()
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	idx, ok := node.propose([]byte("set x=1"))
+	if !ok || idx != 1 {
+		t.Fatalf("Propose returned (%d,%v), want (1,true)", idx, ok)
+	}
+	if got := node.LogLen(); got != 1 {
+		t.Errorf("leader log len = %d, want 1", got)
+	}
+}
 
 // func TestLeader_ReplicatesEntries_ToPeers(t *testing.T) {
 // 	p1 := &recordingPeer{voteGranted: true, term: 1}
