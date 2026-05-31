@@ -43,6 +43,8 @@ type node struct {
 	cancel            context.CancelFunc
 	peers             []Peer
 	mu                sync.Mutex
+	nextIndex         map[Peer]uint64
+	matchIndex        map[Peer]uint64
 }
 
 const defaultElectionTimeout time.Duration = 300 * time.Millisecond
@@ -71,7 +73,9 @@ func NewRaftNode(name string, electionTimeout time.Duration, heartbeatInterval t
 		heartbeatChan:     make(chan uint64),
 		peers:             []Peer{},
 		// Insert a sentinel logentry in index 0 to make log entries 1-based.
-		log: []LogEntry{LogEntry{0, 0, []byte{}}},
+		log:        []LogEntry{LogEntry{0, 0, []byte{}}},
+		nextIndex:  nil,
+		matchIndex: nil,
 	}
 }
 
@@ -128,9 +132,7 @@ func (node *node) runFollower(ctx context.Context) {
 		select {
 		case <-electionTimer.C:
 			node.mu.Lock()
-			node.state = Candidate
-			node.term = node.term + 1
-			node.votedFor = node.name
+			node.becomeCandidate()
 			node.mu.Unlock()
 			return
 		case <-node.heartbeatChan:
@@ -177,7 +179,7 @@ func (node *node) runCandidate(ctx context.Context) {
 
 	// Check that node wasn't bumped down to Follower with a RequestVote since we unlocked above.
 	if nVotes >= nVotesRequired && node.term == electionTerm && node.state == Candidate {
-		node.state = Leader
+		node.becomeLeader()
 		node.mu.Unlock()
 		return
 	}
@@ -388,6 +390,8 @@ func (node *node) becomeFollower(term uint64) {
 	node.term = term
 	node.votedFor = ""
 	node.state = Follower
+	node.nextIndex = nil
+	node.matchIndex = nil
 }
 
 func (node *node) Propose(cmd []byte) (index uint64, ok bool) {
@@ -404,4 +408,24 @@ func (node *node) propose(cmd []byte) (index uint64, ok bool) {
 	newIndex := uint64(node.LogLen() + 1)
 	node.log = append(node.log, LogEntry{Term: node.term, Index: newIndex, Command: cmd})
 	return newIndex, true
+}
+
+// Caller must do node.mu.Lock()
+func (node *node) becomeLeader() {
+	node.state = Leader
+	node.nextIndex = make(map[Peer]uint64)
+	node.matchIndex = make(map[Peer]uint64)
+	for _, peer := range node.peers {
+		node.nextIndex[peer] = uint64(node.LogLen()) + 1
+		node.matchIndex[peer] = 0
+	}
+}
+
+// Caller must do node.mu.Lock()
+func (node *node) becomeCandidate() {
+	node.state = Candidate
+	node.term = node.term + 1
+	node.votedFor = node.name
+	node.nextIndex = nil
+	node.matchIndex = nil
 }
