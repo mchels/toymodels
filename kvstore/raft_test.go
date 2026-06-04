@@ -1,6 +1,7 @@
 package kvstore
 
 import (
+	"bytes"
 	"context"
 	"kvstore/proto"
 	"sync"
@@ -591,6 +592,38 @@ func newLeaderForTest(t *testing.T) node {
 	}
 }
 
+func newLeaderForTestWithPeers(t *testing.T, peer1 *recordingPeer, peer2 *recordingPeer) *node {
+	node := NewRaftNode("node1", 50*time.Millisecond, 0)
+	node.SetPeers([]Peer{peer1, peer2})
+	node.Start()
+	for {
+		if node.State() == Leader {
+			return node
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func peerSawEntry(peer *recordingPeer, want []byte) bool {
+	for _, appendCall := range peer.appendCalls {
+		for _, logEntry := range appendCall.Entries {
+			if bytes.Equal(logEntry.Command, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func peerSawEntries(peer *recordingPeer, expectedEntries ...string) bool {
+	for _, expected := range expectedEntries {
+		if !peerSawEntry(peer, []byte(expected)) {
+			return false
+		}
+	}
+	return true
+}
+
 func TestPropose_NonLeader_Rejected(t *testing.T) {
 	node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
 	defer node.Stop()
@@ -613,19 +646,21 @@ func TestPropose_Leader_AppendsToLog(t *testing.T) {
 	}
 }
 
-// func TestLeader_ReplicatesEntries_ToPeers(t *testing.T) {
-// 	p1 := &recordingPeer{voteGranted: true, term: 1}
-// 	p2 := &recordingPeer{voteGranted: true, term: 1}
-// 	node := newLeaderForTestWithPeers(t, p1, p2)
+func TestLeader_ReplicatesEntries_ToPeers(t *testing.T) {
+	p1 := &recordingPeer{voteGranted: true, term: 1}
+	p2 := &recordingPeer{voteGranted: true, term: 1}
+	node := newLeaderForTestWithPeers(t, p1, p2)
 
-// 	node.Propose([]byte("a"))
-// 	node.Propose([]byte("b"))
+	node.Propose([]byte("a"))
+	node.Propose([]byte("b"))
 
-// 	// Within a few heartbeat intervals, each peer should see entries [a,b] in some call.
-// 	waitFor(t, 500*time.Millisecond, func() bool {
-// 		return peerSawEntries(p1, "a", "b") && peerSawEntries(p2, "a", "b")
-// 	})
-// }
+	// Within a few heartbeat intervals, each peer should see entries [a,b] in some call.
+	time.Sleep(120 * time.Millisecond)
+	node.Stop()
+	if !peerSawEntries(p1, "a", "b") || !peerSawEntries(p2, "a", "b") {
+		t.Error("A peer didn't see all entries")
+	}
+}
 
 // func TestFollower_AcceptsAppend_WithMatchingPrev(t *testing.T) {
 // 	node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)

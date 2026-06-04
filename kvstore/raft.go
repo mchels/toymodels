@@ -248,8 +248,11 @@ func (node *node) runLeader(ctx context.Context) {
 		nodeName := node.name
 		nodeTerm := node.term
 		nodePeers := slices.Clone(node.peers)
+		// TODO: Consider cloning node.nextIndex to avoid mutation while using nextIndex.
+		nextIndex := node.nextIndex
+		nodeLog := slices.Clone(node.log)
 		node.mu.Unlock()
-		appendEntriesResults := sendHeartbeats(nodeName, nodeTerm, nodePeers)
+		appendEntriesResults := requestAppendEntries(nodeName, nodeTerm, nodePeers, nextIndex, nodeLog)
 		node.mu.Lock()
 		maxTerm := node.term
 		for _, result := range appendEntriesResults {
@@ -269,15 +272,29 @@ func (node *node) runLeader(ctx context.Context) {
 	}
 }
 
-func sendHeartbeats(nodeName string, nodeTerm uint64, nodePeers []Peer) []appendEntriesResult {
+func requestAppendEntries(nodeName string, nodeTerm uint64, nodePeers []Peer, nextIndex map[Peer]uint64, nodeLog []LogEntry) []appendEntriesResult {
 	var wg sync.WaitGroup
 	appendEntriesChan := make(chan appendEntriesResult)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, peer := range nodePeers {
+		prevLogIndex := nextIndex[peer] - 1
+		nEntries := len(nodeLog[nextIndex[peer]:])
+		pbEntries := make([]*proto.LogEntry, 0, nEntries)
+		for _, logEntry := range nodeLog[nextIndex[peer]:] {
+			pbEntries = append(pbEntries,
+				&proto.LogEntry{
+					Term:    logEntry.Term,
+					Index:   logEntry.Index,
+					Command: logEntry.Command,
+				})
+		}
 		req := &proto.AppendEntriesRequest{
-			Term:     nodeTerm,
-			LeaderId: nodeName,
+			Term:         nodeTerm,
+			LeaderId:     nodeName,
+			Entries:      pbEntries,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  nodeLog[prevLogIndex].Term,
 		}
 		wg.Add(1)
 		go func(p Peer) {
