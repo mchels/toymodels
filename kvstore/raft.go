@@ -45,6 +45,7 @@ type node struct {
 	mu                sync.Mutex
 	nextIndex         map[Peer]uint64
 	matchIndex        map[Peer]uint64
+	runDone           chan struct{}
 }
 
 const defaultElectionTimeout time.Duration = 300 * time.Millisecond
@@ -107,10 +108,21 @@ func (node *node) Start() {
 	node.mu.Lock()
 	if node.cancel != nil {
 		node.cancel()
+		prev := node.runDone
+		node.mu.Unlock()
+		if prev != nil {
+			<-prev // Wait for the previous run to stop before starting a new one.
+		}
+		node.mu.Lock()
 	}
+	runDone := make(chan struct{})
 	node.cancel = cancel
+	node.runDone = runDone
 	node.mu.Unlock()
-	go node.run(ctx)
+	go func() {
+		defer close(runDone)
+		node.run(ctx)
+	}()
 }
 
 func (node *node) run(ctx context.Context) {
@@ -334,10 +346,15 @@ type appendEntriesResult struct {
 
 func (node *node) Stop() {
 	node.mu.Lock()
-	if node.cancel != nil {
-		node.cancel()
-	}
+	cancel := node.cancel
+	runDone := node.runDone
 	node.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if runDone != nil {
+		<-runDone
+	}
 }
 
 type requestVoteResult struct {
