@@ -605,6 +605,8 @@ func newLeaderForTestWithPeers(t *testing.T, peer1 *recordingPeer, peer2 *record
 }
 
 func peerSawEntry(peer *recordingPeer, want []byte) bool {
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
 	for _, appendCall := range peer.appendCalls {
 		for _, logEntry := range appendCall.Entries {
 			if bytes.Equal(logEntry.Command, want) {
