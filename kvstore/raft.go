@@ -104,10 +104,6 @@ func (node *node) SetPeers(peers []Peer) {
 	node.peers = peers
 }
 
-func (node *node) LogLen() int {
-	return LogLen(node.log)
-}
-
 func (node *node) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	node.mu.Lock()
@@ -458,7 +454,7 @@ func (node *node) propose(cmd []byte) (index uint64, ok bool) {
 	if node.state != Leader {
 		return 0, false
 	}
-	newIndex := uint64(node.LogLen() + 1)
+	newIndex := uint64(LogLen(node.log) + 1)
 	node.log = append(node.log, LogEntry{Term: node.term, Index: newIndex, Command: cmd})
 	return newIndex, true
 }
@@ -469,7 +465,7 @@ func (node *node) becomeLeader() {
 	node.nextIndex = make(map[Peer]uint64)
 	node.matchIndex = make(map[Peer]uint64)
 	for _, peer := range node.peers {
-		node.nextIndex[peer] = uint64(node.LogLen()) + 1
+		node.nextIndex[peer] = uint64(LogLen(node.log)) + 1
 		node.matchIndex[peer] = 0
 	}
 }

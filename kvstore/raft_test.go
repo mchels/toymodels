@@ -644,7 +644,7 @@ func TestPropose_Leader_AppendsToLog(t *testing.T) {
 	if !ok || idx != 1 {
 		t.Fatalf("Propose returned (%d,%v), want (1,true)", idx, ok)
 	}
-	if got := node.LogLen(); got != 1 {
+	if got := LogLen(node.log); got != 1 {
 		t.Errorf("leader log len = %d, want 1", got)
 	}
 }
@@ -678,8 +678,8 @@ func TestLeader_ReplicatesEntries_ToPeers(t *testing.T) {
 // 	if !resp.Success {
 // 		t.Fatal("expected Success on matching prev")
 // 	}
-// 	if node.LogLen() != 2 {
-// 		t.Errorf("log len = %d, want 2", node.LogLen())
+// 	if LogLen(node.log) != 2 {
+// 		t.Errorf("log len = %d, want 2", LogLen(node.log))
 // 	}
 // }
 
@@ -715,8 +715,8 @@ func TestFollower_RejectsAppend_WhenPrevMissing(t *testing.T) {
 // 	if cmd := node.EntryAt(3); string(cmd) != "good" {
 // 		t.Errorf("index 3 = %q, want %q (truncate-and-replace)", cmd, "good")
 // 	}
-// 	if node.LogLen() != 3 {
-// 		t.Errorf("log len = %d, want 3 (no spurious extension)", node.LogLen())
+// 	if LogLen(node.log) != 3 {
+// 		t.Errorf("log len = %d, want 3 (no spurious extension)", LogLen(node.log))
 // 	}
 // }
 
