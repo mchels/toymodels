@@ -584,6 +584,7 @@ func newLeaderForTest(t *testing.T) node {
 	peer2 := &mockPeer{voteGranted: true, term: 1}
 	node.SetPeers([]Peer{peer1, peer2}) // 3-node cluster
 	node.Start()
+	t.Cleanup(node.Stop)
 	for {
 		if node.State() == Leader {
 			return *node
@@ -596,6 +597,7 @@ func newLeaderForTestWithPeers(t *testing.T, peer1 *recordingPeer, peer2 *record
 	node := NewRaftNode("node1", 50*time.Millisecond, 0)
 	node.SetPeers([]Peer{peer1, peer2})
 	node.Start()
+	t.Cleanup(node.Stop)
 	for {
 		if node.State() == Leader {
 			return node
@@ -636,7 +638,6 @@ func TestPropose_NonLeader_Rejected(t *testing.T) {
 
 func TestPropose_Leader_AppendsToLog(t *testing.T) {
 	node := newLeaderForTest(t)
-	defer node.Stop()
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	idx, ok := node.propose([]byte("set x=1"))
@@ -658,7 +659,6 @@ func TestLeader_ReplicatesEntries_ToPeers(t *testing.T) {
 
 	// Within a few heartbeat intervals, each peer should see entries [a,b] in some call.
 	time.Sleep(120 * time.Millisecond)
-	node.Stop()
 	if !peerSawEntries(p1, "a", "b") || !peerSawEntries(p2, "a", "b") {
 		t.Error("A peer didn't see all entries")
 	}
