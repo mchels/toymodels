@@ -279,8 +279,7 @@ func (node *node) runLeader(ctx context.Context) {
 		}
 		// Check that we didn't change term and state since we unlocked above to send heartbeats.
 		if maxTerm > node.term && node.state == Leader && node.term == nodeTerm {
-			node.state = Follower
-			node.term = maxTerm
+			node.becomeFollower(maxTerm)
 			node.mu.Unlock()
 			return
 		}
