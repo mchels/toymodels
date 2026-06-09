@@ -683,18 +683,18 @@ func TestLeader_ReplicatesEntries_ToPeers(t *testing.T) {
 // 	}
 // }
 
-// func TestFollower_RejectsAppend_WhenPrevMissing(t *testing.T) {
-// 	node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
-// 	setTerm(node, 1)
-// 	resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{
-// 		Term: 1, LeaderId: "L",
-// 		PrevLogIndex: 5, PrevLogTerm: 1, // follower has no entry at index 5
-// 		Entries: []*proto.LogEntry{{Term: 1, Index: 6, Command: []byte("x")}},
-// 	})
-// 	if resp.Success {
-// 		t.Error("must reject when PrevLogIndex is missing in follower log")
-// 	}
-// }
+func TestFollower_RejectsAppend_WhenPrevMissing(t *testing.T) {
+	node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)
+	node.SetTerm(1)
+	resp := node.HandleAppendEntries(&proto.AppendEntriesRequest{
+		Term: 1, LeaderId: "L",
+		PrevLogIndex: 5, PrevLogTerm: 1, // follower has no entry at index 5
+		Entries: []*proto.LogEntry{{Term: 1, Index: 6, Command: []byte("x")}},
+	})
+	if resp.Success {
+		t.Error("must reject when PrevLogIndex is missing in follower log")
+	}
+}
 
 // func TestFollower_TruncatesConflictingTail(t *testing.T) {
 // 	node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)

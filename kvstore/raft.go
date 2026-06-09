@@ -92,6 +92,12 @@ func (node *node) CurrentTerm() uint64 {
 	return node.term
 }
 
+func (node *node) SetTerm(term uint64) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.term = term
+}
+
 func (node *node) SetPeers(peers []Peer) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -99,8 +105,7 @@ func (node *node) SetPeers(peers []Peer) {
 }
 
 func (node *node) LogLen() int {
-	// Subtract 1 to account for sentinel log entry.
-	return len(node.log) - 1
+	return LogLen(node.log)
 }
 
 func (node *node) Start() {
@@ -395,6 +400,15 @@ func (node *node) HandleRequestVote(req *proto.RequestVoteRequest) *proto.Reques
 	}
 }
 
+func HasMatchingEntry(nodeLog []LogEntry, idx uint64, term uint64) bool {
+	return int(idx) <= LogLen(nodeLog) && nodeLog[idx].Term == term
+}
+
+func LogLen(nodeLog []LogEntry) int {
+	// Subtract 1 because of sentinel value at position 0.
+	return len(nodeLog) - 1
+}
+
 func (node *node) HandleAppendEntries(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse {
 	node.mu.Lock()
 	currentTerm := node.term
@@ -408,6 +422,11 @@ func (node *node) HandleAppendEntries(req *proto.AppendEntriesRequest) *proto.Ap
 		node.becomeFollower(req.Term)
 	} else if req.Term == currentTerm && node.state == Leader {
 		panic("Received heartbeat at same term while leader. This should never happen.")
+	} else if req.PrevLogIndex > 0 && !HasMatchingEntry(node.log, req.PrevLogIndex, req.Term) {
+		return &proto.AppendEntriesResponse{
+			Term:    currentTerm,
+			Success: false,
+		}
 	}
 	// Reset currentTerm since becomeFollower may have changed term.
 	currentTerm = node.term
