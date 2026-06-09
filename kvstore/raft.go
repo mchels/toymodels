@@ -20,6 +20,8 @@ const (
 
 // Peer represents a remote Raft node that can be called for votes
 type Peer interface {
+	Name() NodeName
+
 	RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error)
 
 	AppendEntries(ctx context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error)
@@ -30,6 +32,8 @@ type LogEntry struct {
 	Index   uint64
 	Command []byte
 }
+
+type NodeName string
 
 type node struct {
 	name              string
@@ -43,8 +47,8 @@ type node struct {
 	cancel            context.CancelFunc
 	peers             []Peer
 	mu                sync.Mutex
-	nextIndex         map[Peer]uint64
-	matchIndex        map[Peer]uint64
+	nextIndex         map[NodeName]uint64
+	matchIndex        map[NodeName]uint64
 	runDone           chan struct{}
 }
 
@@ -285,16 +289,16 @@ func (node *node) runLeader(ctx context.Context) {
 	}
 }
 
-func requestAppendEntries(nodeName string, nodeTerm uint64, nodePeers []Peer, nextIndex map[Peer]uint64, nodeLog []LogEntry) []appendEntriesResult {
+func requestAppendEntries(nodeName string, nodeTerm uint64, nodePeers []Peer, nextIndex map[NodeName]uint64, nodeLog []LogEntry) []appendEntriesResult {
 	var wg sync.WaitGroup
 	appendEntriesChan := make(chan appendEntriesResult)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, peer := range nodePeers {
-		prevLogIndex := nextIndex[peer] - 1
-		nEntries := len(nodeLog[nextIndex[peer]:])
+		prevLogIndex := nextIndex[peer.Name()] - 1
+		nEntries := len(nodeLog[nextIndex[peer.Name()]:])
 		pbEntries := make([]*proto.LogEntry, 0, nEntries)
-		for _, logEntry := range nodeLog[nextIndex[peer]:] {
+		for _, logEntry := range nodeLog[nextIndex[peer.Name()]:] {
 			pbEntries = append(pbEntries,
 				&proto.LogEntry{
 					Term:    logEntry.Term,
@@ -462,11 +466,11 @@ func (node *node) propose(cmd []byte) (index uint64, ok bool) {
 // Caller must do node.mu.Lock()
 func (node *node) becomeLeader() {
 	node.state = Leader
-	node.nextIndex = make(map[Peer]uint64)
-	node.matchIndex = make(map[Peer]uint64)
+	node.nextIndex = make(map[NodeName]uint64)
+	node.matchIndex = make(map[NodeName]uint64)
 	for _, peer := range node.peers {
-		node.nextIndex[peer] = uint64(LogLen(node.log)) + 1
-		node.matchIndex[peer] = 0
+		node.nextIndex[peer.Name()] = uint64(LogLen(node.log)) + 1
+		node.matchIndex[peer.Name()] = 0
 	}
 }
 

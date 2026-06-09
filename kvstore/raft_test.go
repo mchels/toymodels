@@ -120,10 +120,15 @@ func TestConcurrentAccess(t *testing.T) {
 
 // Mock peer for testing
 type mockPeer struct {
+	name        NodeName
 	voteGranted bool
 	term        uint64
 	appendCalls atomic.Int64
 	mu          sync.Mutex
+}
+
+func (m *mockPeer) Name() NodeName {
+	return m.name
 }
 
 func (m *mockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
@@ -142,6 +147,7 @@ func (m *mockPeer) AppendEntries(ctx context.Context, req *proto.AppendEntriesRe
 // Slow peer for testing concurrency. Tracks the maximum number of concurrent
 // in-flight RequestVote calls observed at this peer.
 type slowMockPeer struct {
+	name        NodeName
 	delay       time.Duration
 	voteGranted bool
 	term        uint64
@@ -149,6 +155,10 @@ type slowMockPeer struct {
 	inFlight    atomic.Int32
 	maxInFlight atomic.Int32
 	mu          sync.Mutex
+}
+
+func (m *slowMockPeer) Name() NodeName {
+	return m.name
 }
 
 func (m *slowMockPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
@@ -549,6 +559,7 @@ func TestHandleAppendEntries_RejectsLowerTerm(t *testing.T) {
 // =============================================================================
 
 type recordingPeer struct {
+	name        NodeName
 	mu          sync.Mutex
 	term        uint64
 	voteGranted bool
@@ -556,6 +567,10 @@ type recordingPeer struct {
 	respond func(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse
 	// History.
 	appendCalls []*proto.AppendEntriesRequest
+}
+
+func (m *recordingPeer) Name() NodeName {
+	return m.name
 }
 
 func (m *recordingPeer) RequestVote(ctx context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
