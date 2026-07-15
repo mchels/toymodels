@@ -3,6 +3,7 @@ package kvstore
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"kvstore/proto"
 	"sync"
 	"sync/atomic"
@@ -772,34 +773,39 @@ func TestFollower_RejectsAppend_WhenPrevMissing(t *testing.T) {
 // 	}
 // }
 
-// func TestLeader_DecrementsNextIndex_OnReject(t *testing.T) {
-// 	p1 := &recordingPeer{voteGranted: true, term: 1}
-// 	// Reject every AppendEntries with PrevLogIndex >= 2; succeed at 1.
-// 	p1.respond = func(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse {
-// 		if req.PrevLogIndex >= 2 {
-// 			return &proto.AppendEntriesResponse{Term: req.Term, Success: false}
-// 		}
-// 		return nil // fall through to default {Success: true}
-// 	}
-// 	p2 := &recordingPeer{voteGranted: true, term: 1}
-// 	node := newLeaderForTestWithPeers(t, p1, p2)
+func TestLeader_DecrementsNextIndex_OnReject(t *testing.T) {
+	p1 := &recordingPeer{name: "p1", voteGranted: true, term: 1}
+	// Reject every AppendEntries with PrevLogIndex >= 2; succeed at 1.
+	p1.respond = func(req *proto.AppendEntriesRequest) *proto.AppendEntriesResponse {
+		if req.PrevLogIndex >= 2 {
+			return &proto.AppendEntriesResponse{Term: req.Term, Success: false}
+		}
+		return nil // fall through to default {Success: true}
+	}
+	p2 := &recordingPeer{name: "p2", voteGranted: true, term: 1}
+	node := newLeaderForTestWithPeers(t, p1, p2)
 
-// 	node.Propose([]byte("a"))
-// 	node.Propose([]byte("b"))
-// 	node.Propose([]byte("c"))
+	node.Propose([]byte("a"))
+	node.Propose([]byte("b"))
+	node.Propose([]byte("c"))
 
-// 	// Eventually p1 should receive a call with PrevLogIndex == 1 (i.e., leader walked back).
-// 	waitFor(t, 500*time.Millisecond, func() bool {
-// 		p1.mu.Lock()
-// 		defer p1.mu.Unlock()
-// 		for _, r := range p1.appendCalls {
-// 			if r.PrevLogIndex == 1 {
-// 				return true
-// 			}
-// 		}
-// 		return false
-// 	})
-// }
+	// Eventually p1 should receive a call with PrevLogIndex == 1 (i.e., leader walked back).
+	time.Sleep(500 * time.Millisecond)
+	// waitFor(t, 500*time.Millisecond, func() bool {
+	{
+		p1.mu.Lock()
+		defer p1.mu.Unlock()
+		for _, r := range p1.appendCalls {
+			fmt.Println(r)
+			if r.PrevLogIndex == 1 {
+				// return true
+			}
+		}
+		t.Error("error", p1)
+		// return false
+	}
+	// })
+}
 
 // func TestRequestVote_DeniesStaleCandidate(t *testing.T) {
 // 	node := NewRaftNode("n1", 250*time.Millisecond, 50*time.Millisecond)

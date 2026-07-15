@@ -2,6 +2,7 @@ package kvstore
 
 import (
 	"context"
+	"fmt"
 	"kvstore/proto"
 	"log"
 	"math/rand"
@@ -276,6 +277,11 @@ func (node *node) runLeader(ctx context.Context) {
 			if result.term > maxTerm {
 				maxTerm = result.term
 			}
+			if !result.success && result.term <= nodeTerm {
+				// Peer didn't recognize the PrevLogIndex the leader sent, so we decrement
+				// nextIndex for the peer so we can retry later with a lower PrevLogIndex.
+				node.nextIndex[result.nodeName] = max(node.nextIndex[result.nodeName], 1)
+			}
 		}
 		// Check that we didn't change term and state since we unlocked above to send heartbeats.
 		if maxTerm > node.term && node.state == Leader && node.term == nodeTerm {
@@ -293,6 +299,7 @@ func requestAppendEntries(nodeName string, nodeTerm uint64, nodePeers []Peer, ne
 	appendEntriesChan := make(chan appendEntriesResult)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	fmt.Println(111, nextIndex)
 	for _, peer := range nodePeers {
 		prevLogIndex := nextIndex[peer.Name()] - 1
 		nEntries := len(nodeLog[nextIndex[peer.Name()]:])
@@ -322,8 +329,9 @@ func requestAppendEntries(nodeName string, nodeTerm uint64, nodePeers []Peer, ne
 			}
 			if resp != nil {
 				appendEntriesChan <- appendEntriesResult{
-					term:    resp.Term,
-					success: resp.Success,
+					nodeName: p.Name(),
+					term:     resp.Term,
+					success:  resp.Success,
 				}
 			}
 		}(peer)
@@ -344,8 +352,9 @@ func requestAppendEntries(nodeName string, nodeTerm uint64, nodePeers []Peer, ne
 }
 
 type appendEntriesResult struct {
-	term    uint64
-	success bool
+	nodeName NodeName
+	term     uint64
+	success  bool
 }
 
 func (node *node) Stop() {
@@ -459,6 +468,7 @@ func (node *node) propose(cmd []byte) (index uint64, ok bool) {
 	}
 	newIndex := uint64(LogLen(node.log) + 1)
 	node.log = append(node.log, LogEntry{Term: node.term, Index: newIndex, Command: cmd})
+	fmt.Println(222, node.log)
 	return newIndex, true
 }
 
